@@ -47,11 +47,16 @@ function faIndex(n: number): string {
 /** The lime square mark shared by the header, the rail and the account block. */
 function BrandMark({ size = 'md' }: { size?: 'md' | 'sm' }) {
   const box = size === 'sm' ? 'w-8 h-8 rounded-lg' : 'w-11 h-11 rounded-2xl'
-  const icon = size === 'sm' ? 'w-4 h-4' : 'w-5 h-5'
+  // The app icon itself is the brand mark, so the rail, the mobile header, the
+  // favicon and the installed PWA always show the exact same artwork
+  // (public/icon.svg → pwa-icon-*.png).
   return (
-    <div className={`${box} bg-black/60 border border-brand-300/35 flex items-center justify-center shadow-[0_0_24px_-6px_rgba(198,244,91,0.5)]`}>
-      <Shield className={`${icon} text-brand-300`} />
-    </div>
+    <img
+      src="/icon.svg"
+      alt=""
+      aria-hidden="true"
+      className={`${box} shrink-0 object-cover border border-brand-300/35 shadow-[0_0_24px_-6px_rgba(198,244,91,0.5)]`}
+    />
   )
 }
 

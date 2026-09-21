@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="NEXUS">
+  <!--
+    NEXUS brand mark — the app/PWA icon.
+    Dark control-center square with a faint grid and the lime cloud outline.
+
+    This file is the source of truth for every raster icon in public/
+    (pwa-icon-192.png, pwa-icon-512.png, pwa-icon-maskable-512.png,
+    apple-touch-icon.png). Re-render the PNGs from this SVG if the mark changes;
+    the rounded-corner variant only masks the corners, the artwork is identical.
+  -->
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="49%" r="46%">
+      <stop offset="0%" stop-color="#c6f45b" stop-opacity="0.16"/>
+      <stop offset="55%" stop-color="#c6f45b" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#c6f45b" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0c120d"/>
+      <stop offset="100%" stop-color="#0a0f0b"/>
+    </linearGradient>
+    <pattern id="grid" width="85.33" height="85.33" patternUnits="userSpaceOnUse">
+      <path d="M85.33 0H0V85.33" fill="none" stroke="#c6f45b" stroke-opacity="0.055" stroke-width="1.5"/>
+    </pattern>
+    <clipPath id="square">
+      <rect x="0" y="0" width="512" height="512" rx="115" ry="115"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#square)">
+    <rect x="0" y="0" width="512" height="512" fill="url(#bg)"/>
+    <rect x="0" y="0" width="512" height="512" fill="url(#grid)"/>
+    <rect x="0" y="0" width="512" height="512" fill="url(#glow)"/>
+  </g>
+
+  <!-- Lime cloud outline (the mark from the app header / deploy panel) -->
+  <path
+    d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"
+    transform="translate(100 100) scale(13)"
+    fill="none"
+    stroke="#c6f45b"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+</svg>
