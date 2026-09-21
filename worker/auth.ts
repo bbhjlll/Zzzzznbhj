@@ -25,7 +25,7 @@ export async function handleSignup(env: Env, request: Request): Promise<Response
     .run()
 
   const { token } = await createSession(env, id)
-  return json({ token, user: { id, email, role } })
+  return json({ token, user: await effectiveUser(env, { id, email, role }) })
 }
 
 export async function handleLogin(env: Env, request: Request): Promise<Response> {
@@ -38,7 +38,7 @@ export async function handleLogin(env: Env, request: Request): Promise<Response>
     return apiError('ایمیل یا رمز عبور اشتباه است', 401)
   }
   const { token } = await createSession(env, row.id)
-  return json({ token, user: { id: row.id, email: row.email, role: row.role ?? 'user' } })
+  return json({ token, user: await effectiveUser(env, { id: row.id, email: row.email, role: row.role ?? 'user' }) })
 }
 
 export async function handleLogout(env: Env, request: Request): Promise<Response> {
@@ -79,12 +79,30 @@ export async function isOwner(env: Env, userId: string): Promise<boolean> {
   return !!first && first.id === userId
 }
 
+/**
+ * Add the derived ownership/admin facts to a user row.
+ *
+ * The owner runs this installation, so it always holds admin rights — even when
+ * its `role` column says otherwise (the owner account is not necessarily the
+ * first one created).
+ *
+ * Login and signup return this shape too: the web app renders its own
+ * navigation straight from the login response, so a plain `role: 'user'` there
+ * would hide the owner-only bot/admin sections until a manual reload.
+ */
+async function effectiveUser<T extends { id: string; role?: string | null }>(env: Env, user: T) {
+  const owner = await isOwner(env, user.id)
+  if (!owner) return { ...user, role: user.role ?? 'user', is_owner: false }
+  // Self-heal the stored role once: anything that reads `users.role` directly
+  // (the admin user list, future guards) then also sees the owner as admin.
+  if ((user.role ?? '') !== 'admin') {
+    await env.DB.prepare('UPDATE users SET role = ? WHERE id = ?').bind('admin', user.id).run().catch(() => null)
+  }
+  return { ...user, role: 'admin', is_owner: true }
+}
+
 export async function handleMe(env: Env, request: Request): Promise<Response> {
   const user = await getUserFromRequest(env, request)
   if (!user) return apiError('نشست منقضی شده است', 401)
-  const owner = await isOwner(env, user.id)
-  // The owner runs this installation, so it always holds admin rights — even
-  // when its `role` column says otherwise (the owner account is not necessarily
-  // the first one created).
-  return json({ user: { ...user, role: owner ? 'admin' : user.role, is_owner: owner } })
+  return json({ user: await effectiveUser(env, user) })
 }

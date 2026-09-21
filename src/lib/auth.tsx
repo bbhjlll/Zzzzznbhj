@@ -43,11 +43,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false))
   }, [])
 
+  /**
+   * Store a session and the authoritative user view for it.
+   *
+   * The navigation (owner-only bot tab, admin section) is rendered straight from
+   * this object, so after storing the token we re-read `/auth/me` — that is what
+   * carries the effective role and the `is_owner` flag — and fall back to the
+   * payload only if that read fails.
+   */
+  const startSession = async (token: string, user: User) => {
+    setToken(token)
+    setUser(user)
+    try {
+      const { user: fresh } = await api<{ user: User }>('/auth/me')
+      setUser(fresh)
+    } catch {
+      /* keep the login payload */
+    }
+  }
+
   const signIn = async (email: string, password: string) => {
     try {
       const { token, user } = await api<{ token: string; user: User }>('/auth/login', { method: 'POST', body: { email, password } })
-      setToken(token)
-      setUser(user)
+      await startSession(token, user)
       return { error: null }
     } catch (e) {
       return { error: e instanceof Error ? e.message : 'خطا در ورود' }
@@ -57,8 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signUp = async (email: string, password: string) => {
     try {
       const { token, user } = await api<{ token: string; user: User }>('/auth/signup', { method: 'POST', body: { email, password } })
-      setToken(token)
-      setUser(user)
+      await startSession(token, user)
       return { error: null }
     } catch (e) {
       return { error: e instanceof Error ? e.message : 'خطا در ثبت‌نام' }
