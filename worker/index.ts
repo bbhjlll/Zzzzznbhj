@@ -735,7 +735,8 @@ async function handleRouted(
 
     // ── Admin: user & quota management ─────────────────────────────────
     if (path.startsWith('/api/admin')) {
-      if (user.role !== 'admin') return apiError('دسترسی فقط برای ادمین', 403)
+      // The installation owner is an admin by definition, whatever its role column says.
+      if (user.role !== 'admin' && !(await isOwner(env, user.id))) return apiError('دسترسی فقط برای ادمین', 403)
       if (path === '/api/admin/users' && method === 'GET') {
         const r = await env.DB.prepare(
           `SELECT u.id, u.email, u.role, u.max_deployments, u.created_at,

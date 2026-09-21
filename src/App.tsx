@@ -30,6 +30,15 @@ function OwnerRoute({ children }: { children?: React.ReactNode }) {
   return <>{children}</>
 }
 
+/** User & quota management — admins (and the owner) only. */
+function AdminRoute({ children }: { children?: React.ReactNode }) {
+  const { user, loading } = useAuth()
+  if (loading) return <div className="min-h-screen flex items-center justify-center"><div className="animate-pulse text-brand-400 text-lg">در حال بارگذاری...</div></div>
+  if (!user) return <Navigate to="/auth" replace />
+  if (user.role !== 'admin' && !user.is_owner) return <Navigate to="/" replace />
+  return <>{children}</>
+}
+
 export default function App() {
   const { user, loading } = useAuth()
 
@@ -50,7 +59,7 @@ export default function App() {
         <Route path="logs" element={<ActivityLogs />} />
         <Route path="optimizer" element={<Optimizer />} />
         <Route path="members" element={<Members />} />
-        <Route path="admin" element={<Admin />} />
+        <Route path="admin" element={<AdminRoute><Admin /></AdminRoute>} />
         <Route path="guide" element={<Guide />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

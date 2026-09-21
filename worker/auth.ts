@@ -82,5 +82,9 @@ export async function isOwner(env: Env, userId: string): Promise<boolean> {
 export async function handleMe(env: Env, request: Request): Promise<Response> {
   const user = await getUserFromRequest(env, request)
   if (!user) return apiError('نشست منقضی شده است', 401)
-  return json({ user: { ...user, is_owner: await isOwner(env, user.id) } })
+  const owner = await isOwner(env, user.id)
+  // The owner runs this installation, so it always holds admin rights — even
+  // when its `role` column says otherwise (the owner account is not necessarily
+  // the first one created).
+  return json({ user: { ...user, role: owner ? 'admin' : user.role, is_owner: owner } })
 }
