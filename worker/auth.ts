@@ -50,12 +50,31 @@ export async function handleLogout(env: Env, request: Request): Promise<Response
   return json({ success: true })
 }
 
+/** The configured owner email, normalised (emails are stored lowercased). */
+function ownerEmail(env: Env): string {
+  return (env.OWNER_EMAIL ?? '').trim().toLowerCase()
+}
+
 /**
- * The panel owner — the account that created this installation (the earliest
- * one). Only the owner sees and manages the deployer bot; every other panel
- * user and every additional admin is kept out of that section entirely.
+ * Is this account the panel owner?
+ *
+ * The owner is the account named by `OWNER_EMAIL` (set in `[vars]` of
+ * wrangler.toml, e.g. `milad201400@gmail.com`). Only the owner sees and manages
+ * the deployer bot; every other panel user and every additional admin is kept
+ * out of that section entirely.
+ *
+ * If no `OWNER_EMAIL` is configured — or that account has not signed up yet —
+ * the installation's first account owns the panel, so the section can never end
+ * up with nobody able to open it.
  */
 export async function isOwner(env: Env, userId: string): Promise<boolean> {
+  const email = ownerEmail(env)
+  if (email) {
+    const owner = await env.DB.prepare('SELECT id FROM users WHERE lower(email) = ? LIMIT 1')
+      .bind(email)
+      .first<{ id: string }>()
+    if (owner) return owner.id === userId
+  }
   const first = await env.DB.prepare('SELECT id FROM users ORDER BY created_at, id LIMIT 1').first<{ id: string }>()
   return !!first && first.id === userId
 }

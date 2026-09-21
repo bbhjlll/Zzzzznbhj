@@ -12,6 +12,10 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*", "/status/*"]
 
+# Same owner pin as production, so local runs behave identically.
+[vars]
+OWNER_EMAIL = "milad201400@gmail.com"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "miliconfigpro-v1"

@@ -9,6 +9,11 @@ compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 # The panel's D1 database is declared here so EVERY deploy path (Cloudflare
 # Builds' plain `npx wrangler deploy`, deploy.sh, manual) always carries the
 # binding — it can never be wiped by a deploy again.
+# Non-secret configuration. The account named here is the panel owner: only it
+# sees the Telegram deployer bot section (nav item, routes and /api/bot-*).
+[vars]
+OWNER_EMAIL = "milad201400@gmail.com"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "db"

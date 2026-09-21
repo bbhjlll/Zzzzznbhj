@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api, ApiError } from '../lib/api'
+import { useAuth } from '../lib/auth'
 import type { BotConfig } from '../lib/types'
 import {
   Bot,
@@ -25,6 +26,7 @@ interface WebhookInfo {
 }
 
 export default function BotConfigPage() {
+  const { user } = useAuth()
   const [config, setConfig] = useState<BotConfig | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -162,7 +164,10 @@ export default function BotConfigPage() {
           <ShieldCheck className="w-5 h-5 text-brand-400" /> ربات عمومی استقرار (فقط مالک)
         </h2>
         <ul className="text-sm text-slate-300 space-y-2 leading-6 list-disc ps-5">
-          <li>این تب فقط برای <b>مالک پنل</b> است؛ کاربران و مدیران پنل آن را نمی‌بینند.</li>
+          <li>
+            این تب فقط برای <b>حساب مالک</b> (<code className="text-brand-200" dir="ltr">{user?.email ?? 'OWNER_EMAIL'}</code>) است؛
+            کاربران و مدیران دیگر پنل آن را نه در منو می‌بینند و نه با آدرس مستقیم.
+          </li>
           <li>ربات یک <b>استقراردهندهٔ عمومی</b> است: هر کاربر تلگرام با <code>/start</code> فضای اختصاصی خودش را می‌گیرد و توکن، لینک و استقرارهایش از بقیه جداست.</li>
           <li>هر کاربر توکن Cloudflare / Railway / Render خودش را در «🔑 توکن‌ها» داخل تلگرام اضافه می‌کند؛ استقرار با همان توکن انجام می‌شود، نه توکن شما.</li>
           <li>ربات هیچ ارتباط دیگری با پنل ندارد — نه مدیریت کاربران پنل، نه دسترسی به داده‌های آن؛ فقط استقرار.</li>
