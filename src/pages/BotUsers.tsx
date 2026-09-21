@@ -164,7 +164,7 @@ export default function BotUsers() {
                   <tr key={user.id} className="border-b border-slate-800/30 hover:bg-slate-800/30 transition-colors">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-full flex items-center justify-center text-white font-bold text-sm shrink-0 bg-gradient-to-br from-brand-500 to-brand-700">
+                        <div className="w-9 h-9 rounded-xl flex items-center justify-center text-brand-200 font-bold text-sm shrink-0 bg-black/60 border border-brand-300/30">
                           {(user.first_name ?? user.username ?? '?')[0]?.toUpperCase()}
                         </div>
                         <div className="min-w-0">

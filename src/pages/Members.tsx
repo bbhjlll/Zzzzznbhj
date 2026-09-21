@@ -39,17 +39,17 @@ const MAX_NODES_PER_LOCATION = 3
 
 // ── World map coordinates (lat/lng → SVG x/y) ─────────────────────
 const MAP_DOTS: Record<string, { x: number; y: number; color: string }> = {
-  us: { x: 165, y: 105, color: '#60a5fa' },
+  us: { x: 165, y: 105, color: '#9ed4b0' },
   de: { x: 310, y: 82, color: '#f59e0b' },
   nl: { x: 300, y: 78, color: '#f97316' },
   tr: { x: 355, y: 105, color: '#ef4444' },
   ae: { x: 395, y: 125, color: '#10b981' },
-  fi: { x: 335, y: 60, color: '#8b5cf6' },
-  gb: { x: 288, y: 76, color: '#3b82f6' },
-  fr: { x: 296, y: 90, color: '#6366f1' },
-  jp: { x: 530, y: 100, color: '#ec4899' },
+  fi: { x: 335, y: 60, color: '#4aa06b' },
+  gb: { x: 288, y: 76, color: '#6fbf8a' },
+  fr: { x: 296, y: 90, color: '#2a5f42' },
+  jp: { x: 530, y: 100, color: '#c6f45b' },
   sg: { x: 470, y: 148, color: '#14b8a6' },
-  kr: { x: 520, y: 100, color: '#a855f7' },
+  kr: { x: 520, y: 100, color: '#4aa06b' },
   in: { x: 425, y: 125, color: '#f59e0b' },
   br: { x: 215, y: 175, color: '#22c55e' },
   ca: { x: 170, y: 80, color: '#ef4444' },
@@ -62,10 +62,10 @@ function WorldMap({ selected, onToggle }: { selected: string[]; onToggle: (code:
       <svg viewBox="0 0 600 260" className="w-full h-auto" style={{ minHeight: 140 }}>
         {/* Grid lines */}
         {[0, 65, 130, 195].map((y) => (
-          <line key={`h${y}`} x1={0} y1={y} x2={600} y2={y} stroke="rgba(59,130,246,0.06)" strokeWidth={0.5} />
+          <line key={`h${y}`} x1={0} y1={y} x2={600} y2={y} stroke="rgba(198,244,91,0.07)" strokeWidth={0.5} />
         ))}
         {[0, 150, 300, 450, 600].map((x) => (
-          <line key={`v${x}`} x1={x} y1={0} x2={x} y2={260} stroke="rgba(59,130,246,0.06)" strokeWidth={0.5} />
+          <line key={`v${x}`} x1={x} y1={0} x2={x} y2={260} stroke="rgba(198,244,91,0.07)" strokeWidth={0.5} />
         ))}
 
         {/* Connection lines between selected countries */}
@@ -76,7 +76,7 @@ function WorldMap({ selected, onToggle }: { selected: string[]; onToggle: (code:
             if (!d1 || !d2) return null
             return (
               <line key={`${c1}-${c2}`} x1={d1.x} y1={d1.y} x2={d2.x} y2={d2.y}
-                stroke="rgba(59,110,245,0.15)" strokeWidth={0.8} strokeDasharray="4 2" />
+                stroke="rgba(198,244,91,0.18)" strokeWidth={0.8} strokeDasharray="4 2" />
             )
           })
         )}
@@ -119,7 +119,7 @@ function WorldMap({ selected, onToggle }: { selected: string[]; onToggle: (code:
 
         {/* Stats */}
         {selected.length > 0 && (
-          <text x={590} y={250} textAnchor="end" fill="rgba(59,110,245,0.6)" fontSize={8}>
+          <text x={590} y={250} textAnchor="end" fill="rgba(198,244,91,0.6)" fontSize={8}>
             {selected.length} کشور فعال
           </text>
         )}

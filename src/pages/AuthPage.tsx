@@ -30,11 +30,12 @@ export default function AuthPage() {
       <div className="relative w-full max-w-md animate-slide-up">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 items-center justify-center shadow-2xl shadow-brand-500/40 mb-4 animate-pulse-glow">
-            <Cloud className="w-9 h-9 text-white" />
+          <div className="inline-flex w-16 h-16 rounded-3xl bg-black/60 border border-brand-300/35 items-center justify-center mb-4 animate-pulse-glow">
+            <Cloud className="w-8 h-8 text-brand-300" />
           </div>
           <h1 className="text-3xl font-bold text-white mb-2">miliconfig <span className="gradient-text">Pro</span></h1>
-          <p className="text-slate-400 text-sm">پنل مدیریت پیشرفته ورکرهای کلودفلر</p>
+          <p className="eyebrow">CONTROL CENTER</p>
+          <p className="text-slate-400 text-sm mt-2">پنل مدیریت پیشرفته ورکرهای کلودفلر</p>
         </div>
 
         {/* Card */}

@@ -34,12 +34,12 @@ export default function Admin() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
-        <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-lg">
-          <Shield className="w-6 h-6 text-white" />
+        <div className="w-11 h-11 rounded-2xl bg-black/60 border border-brand-300/35 flex items-center justify-center shadow-[0_0_24px_-6px_rgba(198,244,91,0.5)]">
+          <Shield className="w-6 h-6 text-brand-300" />
         </div>
         <div>
           <h1 className="text-2xl font-bold text-white">مدیریت کاربران</h1>
-          <p className="text-sm text-slate-500">نقش‌ها و سقف استقرار هر کاربر</p>
+          <p className="eyebrow-muted mt-1">ADMIN &amp; QUOTAS</p>
         </div>
       </div>
 
