@@ -41,7 +41,10 @@ export default function Layout() {
   const { user, signOut } = useAuth()
   const navigate = useNavigate()
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const navItems = user?.role === 'admin' ? [...baseNavItems, adminNavItem] : baseNavItems
+  // The bot is the owner's own deployer, not a panel feature: even panel
+  // admins never see its section.
+  const visibleNav = baseNavItems.filter((item) => user?.is_owner || (item.to !== '/bot-config' && item.to !== '/bot-users'))
+  const navItems = user?.role === 'admin' ? [...visibleNav, adminNavItem] : visibleNav
 
   const handleSignOut = async () => {
     await signOut()

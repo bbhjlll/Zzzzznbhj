@@ -1,6 +1,6 @@
 import type { Env } from './env'
 import { apiError, json, getUserFromRequest, logActivity, genId, nowIso, safeJsonParse } from './util'
-import { handleSignup, handleLogin, handleLogout, handleMe } from './auth'
+import { handleSignup, handleLogin, handleLogout, handleMe, isOwner } from './auth'
 import { startDeployment } from './deploy'
 import { verifyRailwayToken, RailwayApiError } from './railway'
 import { verifyRenderToken, RenderApiError } from './render'
@@ -360,14 +360,6 @@ async function setBotWebhook(botToken: string, origin: string, secret: string): 
   return { ok: !!data?.ok, description: data?.description }
 }
 
-/**
- * One-time code the owner sends to the bot as `/start <code>` to become its
- * owner. Regenerated lazily whenever the bot has no owner yet, cleared on claim.
- */
-function newClaimCode(): string {
-  return genId().replace(/-/g, '').slice(0, 12).toLowerCase()
-}
-
 /** Live webhook diagnostics straight from Telegram (getWebhookInfo). */
 async function botWebhookInfo(env: Env, userId: string): Promise<Response> {
   const row = await env.DB.prepare('SELECT bot_token FROM bot_config WHERE user_id = ? LIMIT 1').bind(userId).first<{ bot_token: string }>()
@@ -395,8 +387,22 @@ async function reconnectBotWebhook(env: Env, userId: string, origin: string): Pr
   return getBotConfig(env, userId)
 }
 
-async function getBotConfig(env: Env, userId: string): Promise<Response> {
+async function getBotConfig(env: Env, userId: string, origin?: string): Promise<Response> {
   const row = await env.DB.prepare('SELECT * FROM bot_config WHERE user_id = ? LIMIT 1').bind(userId).first<Record<string, unknown>>()
+  // Self-heal bots whose webhook was registered before per-bot secrets existed:
+  // without a secret Telegram sends no routing header and the update can only be
+  // routed when the whole install runs a single bot. Re-registering here gives
+  // every panel user's bot its own exact routing again.
+  if (row && origin && row.is_active && !row.webhook_secret && row.bot_token) {
+    const secret = genId().replace(/-/g, '')
+    const hook = await setBotWebhook(sanitizeBotToken(row.bot_token as string), origin, secret)
+    if (hook.ok) {
+      await env.DB.prepare('UPDATE bot_config SET webhook_url = ?, webhook_secret = ?, updated_at = ? WHERE id = ?')
+        .bind(`${origin}/api/webhooks/telegram`, secret, nowIso(), row.id as string)
+        .run()
+      row.webhook_secret = secret
+    }
+  }
   return json({ data: row ? await botConfigRowToObj(row) : null })
 }
 
@@ -424,14 +430,12 @@ async function saveBotConfig(env: Env, userId: string, request: Request, origin:
       `UPDATE bot_config SET
          welcome_message = COALESCE(?, welcome_message),
          is_active = COALESCE(?, is_active),
-         claim_code = COALESCE(claim_code, ?),
          updated_at = ?
        WHERE id = ?`,
     )
       .bind(
         body.welcome_message?.trim() ?? null,
         typeof body.is_active === 'boolean' ? (body.is_active ? 1 : 0) : null,
-        existing.chat_id ? null : newClaimCode(),
         nowIso(),
         existing.id as string,
       )
@@ -440,13 +444,23 @@ async function saveBotConfig(env: Env, userId: string, request: Request, origin:
       const updated = await env.DB.prepare('SELECT * FROM bot_config WHERE user_id = ? LIMIT 1').bind(userId).first<Record<string, unknown>>()
       return json({ data: updated ? await botConfigRowToObj(updated) : null, warning: `وب‌هوک دوباره وصل نشد: ${reconnect.description ?? 'خطای ناشناخته'}` })
     }
-    return getBotConfig(env, userId)
+    return getBotConfig(env, userId, origin)
   }
 
   if (!body.bot_token?.trim() && !existing) return apiError('توکن ربات الزامی است')
   const botToken = sanitizeBotToken(body.bot_token!)
   if (!/^\d{8,12}:[A-Za-z0-9_-]{30,}$/.test(botToken)) {
     return apiError('قالب توکن درست نیست — توکن باید شبیه 123456789:AAH... باشد و مستقیم از BotFather کپی شود')
+  }
+
+  // One bot, one panel account. Two users sharing a bot token would make the
+  // webhook route updates to whichever row wins, i.e. one of them would deploy
+  // with the other's Cloudflare token — refuse it outright.
+  const claimed = await env.DB.prepare('SELECT user_id FROM bot_config WHERE bot_token = ? LIMIT 1')
+    .bind(botToken)
+    .first<{ user_id: string }>()
+  if (claimed && claimed.user_id !== userId) {
+    return apiError('این ربات قبلاً به حساب کاربری دیگری وصل شده است. هر ربات فقط به یک حساب تعلق دارد — در BotFather یک ربات تازه بسازید و توکن آن را اینجا وارد کنید')
   }
   const welcome = body.welcome_message?.trim()
     || ((existing?.welcome_message as string) ?? '')
@@ -473,16 +487,16 @@ async function saveBotConfig(env: Env, userId: string, request: Request, origin:
   }
   if (existing) {
     await env.DB.prepare(
-      `UPDATE bot_config SET bot_token = ?, bot_username = ?, webhook_url = ?, webhook_secret = ?, is_active = ?, welcome_message = ?, claim_code = COALESCE(claim_code, ?), updated_at = ? WHERE id = ?`,
+      `UPDATE bot_config SET bot_token = ?, bot_username = ?, webhook_url = ?, webhook_secret = ?, is_active = ?, welcome_message = ?, updated_at = ? WHERE id = ?`,
     )
-      .bind(botToken, botUsername, webhookUrl, webhookSecret, body.is_active === false ? 0 : 1, welcome, existing.chat_id ? null : newClaimCode(), nowIso(), existing.id as string)
+      .bind(botToken, botUsername, webhookUrl, webhookSecret, body.is_active === false ? 0 : 1, welcome, nowIso(), existing.id as string)
       .run()
   } else {
     await env.DB.prepare(
-      `INSERT INTO bot_config (id, user_id, bot_token, bot_username, webhook_url, webhook_secret, is_active, welcome_message, claim_code, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+      `INSERT INTO bot_config (id, user_id, bot_token, bot_username, webhook_url, webhook_secret, is_active, welcome_message, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
     )
-      .bind(genId(), userId, botToken, botUsername, webhookUrl, webhookSecret, welcome, newClaimCode(), nowIso(), nowIso())
+      .bind(genId(), userId, botToken, botUsername, webhookUrl, webhookSecret, welcome, nowIso(), nowIso())
       .run()
   }
 
@@ -491,7 +505,7 @@ async function saveBotConfig(env: Env, userId: string, request: Request, origin:
   await syncBotProfile(botToken, origin).catch(() => null)
 
   await logActivity(env, userId, 'bot_configured', 'bot', botUsername)
-  return getBotConfig(env, userId)
+  return getBotConfig(env, userId, origin)
 }
 
 async function listBotUsers(env: Env, userId: string): Promise<Response> {
@@ -500,11 +514,12 @@ async function listBotUsers(env: Env, userId: string): Promise<Response> {
 }
 
 async function updateBotUser(env: Env, userId: string, id: string, request: Request): Promise<Response> {
-  const body = safeJsonParse<{ is_active?: boolean; is_admin?: boolean }>(await request.text().catch(() => ''), {})
+  // The only lever the owner has over a public bot's users: block or unblock.
+  // There are no bot-side admins any more, so nothing else is editable.
+  const body = safeJsonParse<{ is_active?: boolean }>(await request.text().catch(() => ''), {})
   const sets: string[] = []
   const binds: (number | string)[] = []
   if (typeof body.is_active === 'boolean') { sets.push('is_active = ?'); binds.push(body.is_active ? 1 : 0) }
-  if (typeof body.is_admin === 'boolean') { sets.push('is_admin = ?'); binds.push(body.is_admin ? 1 : 0) }
   if (!sets.length) return apiError('فیلدی برای به‌روزرسانی نیست')
   binds.push(id, userId)
   const r = await env.DB.prepare(`UPDATE bot_users SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`).bind(...binds).run()
@@ -645,9 +660,15 @@ async function handleRouted(
     if (path.match(/^\/api\/deployments\/[^/]+$/) && method === 'GET') return await getDeployment(env, user.id, path.split('/')[3])
     if (path.match(/^\/api\/deployments\/[^/]+$/) && method === 'DELETE') return await deleteDeployment(env, user.id, path.split('/')[3])
 
+    // The deployer bot is the owner's own tool: it is not a panel feature for
+    // users or admins, so the whole section is closed to everyone else.
+    if ((path.startsWith('/api/bot-config') || path.startsWith('/api/bot-users')) && !(await isOwner(env, user.id))) {
+      return apiError('این بخش فقط برای مالک پنل است', 403)
+    }
+
     if (path === '/api/bot-config/webhook-info' && method === 'GET') return await botWebhookInfo(env, user.id)
     if (path === '/api/bot-config/reconnect' && method === 'POST') return await reconnectBotWebhook(env, user.id, origin)
-    if (path === '/api/bot-config' && method === 'GET') return await getBotConfig(env, user.id)
+    if (path === '/api/bot-config' && method === 'GET') return await getBotConfig(env, user.id, origin)
     if (path === '/api/bot-config' && (method === 'PUT' || method === 'PATCH')) return await saveBotConfig(env, user.id, request, origin)
 
     if (path === '/api/bot-users' && method === 'GET') return await listBotUsers(env, user.id)

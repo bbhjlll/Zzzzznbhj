@@ -130,6 +130,25 @@ CREATE TABLE IF NOT EXISTS bot_config (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Public deployer bot: one row per Telegram user of the bot.
+--
+-- The bot is a standalone deployment tool: each Telegram user gets their own
+-- isolated space (`user_id` points at a synthetic, sign-in-less account) and
+-- their own unique access token / deep link (`access_token`). Bot work never
+-- touches a real panel account's data.
+CREATE TABLE IF NOT EXISTS bot_tenants (
+  id TEXT PRIMARY KEY,
+  telegram_id TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  access_token TEXT NOT NULL UNIQUE,
+  username TEXT,
+  first_name TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_tenants_token ON bot_tenants(access_token);
+
 -- Telegram bot end-users
 CREATE TABLE IF NOT EXISTS bot_users (
   id TEXT PRIMARY KEY,

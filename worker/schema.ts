@@ -206,7 +206,18 @@ const SCHEMA_STATEMENTS = [
     data TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
+  `CREATE TABLE IF NOT EXISTS bot_tenants (
+    id TEXT PRIMARY KEY,
+    telegram_id TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    access_token TEXT NOT NULL UNIQUE,
+    username TEXT,
+    first_name TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT
+  )`,
   `CREATE INDEX IF NOT EXISTS idx_bot_users_user ON bot_users(user_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_bot_tenants_token ON bot_tenants(access_token)`,
   `CREATE INDEX IF NOT EXISTS idx_bot_sessions_user ON bot_sessions(user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_activity_logs_user ON activity_logs(user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_activity_logs_created ON activity_logs(created_at DESC)`,

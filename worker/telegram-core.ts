@@ -27,11 +27,27 @@ export interface BotConfigRow {
   is_active: number
   welcome_message: string
   chat_id?: string | null
-  /** One-time code the owner sends as `/start <code>` to claim this bot. */
+  bot_username?: string | null
+  /** Legacy one-time claim code — the public deployer bot has no owner gate. */
   claim_code?: string | null
 }
 
 export interface BotSession { state: string; data: Record<string, unknown> }
+
+/** A Telegram user of the public deployer bot — their own isolated space. */
+export interface BotTenant {
+  id: string
+  telegram_id: string
+  /** Synthetic, sign-in-less panel account that owns this space's data. */
+  user_id: string
+  /** The tenant's unique route token (also the personal deep-link payload). */
+  access_token: string
+  username?: string | null
+  first_name?: string | null
+}
+
+/** Deployments a bot tenant may run (the panel owner can't be reached to ask). */
+export const BOT_TENANT_QUOTA = 10
 
 export interface TgButton { text: string; callback_data?: string; url?: string }
 export interface TgKeyboard { inline_keyboard: TgButton[][] }
@@ -42,9 +58,17 @@ export interface ScreenCtx {
   cfg: BotConfigRow
   chatId: number | string
   telegramId: string
+  /**
+   * Owner of the data this screen may touch: the Telegram user's own isolated
+   * space (bot_tenants.user_id) — never a panel account, never another user.
+   */
+  userId: string
+  /** The caller's tenant row — their unique token and identity. */
+  tenant?: BotTenant | null
+  /** Bot @username, for building the personal deep link. */
+  botUsername?: string | null
   /** Panel origin — used for links back into the web app. */
   origin: string
-  isAdmin: boolean
 }
 
 export interface TgEnvelope<T> { ok: boolean; result?: T; description?: string }
@@ -102,22 +126,23 @@ export function answerCb(token: string, id: string, text?: string): Promise<TgEn
 export async function syncBotProfile(token: string, webAppUrl: string): Promise<void> {
   await tg(token, 'setMyCommands', {
     commands: [
-      { command: 'start', description: 'شروع و منوی اصلی' },
-      { command: 'status', description: 'داشبورد و وضعیت' },
-      { command: 'workers', description: 'ورکرهای مستقرشده' },
-      { command: 'deploy', description: 'استقرار ورکر جدید' },
+      { command: 'start', description: 'شروع و ساخت فضای اختصاصی شما' },
+      { command: 'deploy', description: 'استقرار ورکر یا پنل (Railway/Render)' },
+      { command: 'workers', description: 'ورکرهای خودتان' },
       { command: 'panels', description: 'پنل‌های آمادهٔ استقرار' },
-      { command: 'servers', description: 'پنل‌های Railway و Render' },
-      { command: 'tokens', description: 'توکن‌های کلودفلر' },
+      { command: 'servers', description: 'پنل‌های Railway و Render شما' },
+      { command: 'tokens', description: 'توکن‌های شما (Cloudflare/Railway/Render)' },
+      { command: 'profile', description: 'توکن و لینک اختصاصی شما' },
       { command: 'quickstart', description: 'شروع سریع' },
       { command: 'menu', description: 'نمایش منو' },
       { command: 'help', description: 'راهنما' },
     ],
   })
   await tg(token, 'setMyDescription', {
-    description: 'پنل مدیریت میلی‌کانفیگ در تلگرام — استقرار ورکر کلودفلر، مدیریت پنل‌ها و وضعیت لحظه‌ای.',
+    description:
+      'ربات عمومی استقرار — ورکر کلودفلر بسازید یا پنل را روی Railway/Render بالا بیاورید. هر کاربر فضای اختصاصی خودش (توکن و لینک یکتا) را دارد و استقرارها با توکن خودِ او انجام می‌شود.',
   })
-  await tg(token, 'setMyShortDescription', { short_description: 'مدیریت ورکرها و پنل‌ها، مستقیم از تلگرام.' })
+  await tg(token, 'setMyShortDescription', { short_description: 'استقرار ورکر و پنل، با توکن خودتان.' })
   await tg(token, 'setChatMenuButton', {
     menu_button: { type: 'web_app', text: 'باز کردن پنل', web_app: { url: webAppUrl } },
   })
@@ -125,29 +150,58 @@ export async function syncBotProfile(token: string, webAppUrl: string): Promise<
 
 // ── Config + sessions ────────────────────────────────────────────────────────
 
-const CONFIG_COLUMNS = 'id, user_id, bot_token, is_active, welcome_message, chat_id, claim_code'
+const CONFIG_COLUMNS = 'id, user_id, bot_token, bot_username, is_active, welcome_message, chat_id, claim_code'
 
 export async function getActiveConfig(env: Env): Promise<BotConfigRow | null> {
   return env.DB.prepare(`SELECT ${CONFIG_COLUMNS} FROM bot_config WHERE is_active = 1 ORDER BY created_at LIMIT 1`)
     .first<BotConfigRow>()
 }
 
+/** How many bots are live right now — 0 or 1 means "a single-bot install". */
+export async function activeBotCount(env: Env): Promise<number> {
+  const row = await env.DB.prepare('SELECT COUNT(*) AS c FROM bot_config WHERE is_active = 1').first<{ c: number }>()
+  return row?.c ?? 0
+}
+
 /**
- * Resolve which bot_config an incoming update belongs to. Telegram echoes back
- * the secret_token registered via setWebhook in the X-Telegram-Bot-Api-Secret-Token
- * header — use it to route precisely, so a stale or other user's active row can
- * never swallow this bot's updates. Falls back to the first active row for hooks
- * registered before secrets existed (they self-heal on the next save).
+ * Resolve which bot_config an incoming update belongs to.
+ *
+ * Every panel user runs **their own bot with their own tokens**, so routing must
+ * be exact: Telegram echoes back the secret_token registered via setWebhook in
+ * the X-Telegram-Bot-Api-Secret-Token header, and that secret maps to exactly one
+ * bot_config row.
+ *
+ * The old code fell back to "the first active row" whenever the secret did not
+ * match, which meant a second user's traffic could be served by the first user's
+ * row — reading (and deploying with) *their* Cloudflare token. Now:
+ *   • a matching secret wins, and
+ *   • a header that matches nothing is dropped (the row is inactive/deleted), and
+ *   • the legacy no-secret fallback only applies when the install genuinely runs
+ *     a single bot (count == 1), so single-bot setups keep working.
  */
 export async function resolveConfig(env: Env, request: Request): Promise<BotConfigRow | null> {
   const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
   if (secret) {
-    const bySecret = await env.DB.prepare(
+    return env.DB.prepare(
       `SELECT ${CONFIG_COLUMNS} FROM bot_config WHERE webhook_secret = ? AND is_active = 1 LIMIT 1`,
     ).bind(secret).first<BotConfigRow>()
-    if (bySecret) return bySecret
   }
+  // No secret header: only a single-bot install may still be routed by default.
+  if ((await activeBotCount(env)) !== 1) return null
   return getActiveConfig(env)
+}
+
+/** Best-effort delete of a chat message (used to wipe pasted secrets). */
+export async function deleteMsg(token: string, chatId: string | number, messageId: number): Promise<void> {
+  await tg(token, 'deleteMessage', { chat_id: chatId, message_id: messageId }).catch(() => null)
+}
+
+/** Strip invisible Unicode and whitespace that copy-paste injects into secrets. */
+export function sanitizeSecret(raw: string): string {
+  return raw
+    // eslint-disable-next-line no-misleading-character-class
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF\s]/g, '')
+    .trim()
 }
 
 export async function saveOwnerChat(env: Env, cfg: BotConfigRow, chatId: number | string): Promise<void> {
@@ -158,36 +212,68 @@ export async function saveOwnerChat(env: Env, cfg: BotConfigRow, chatId: number 
   cfg.chat_id = String(chatId)
 }
 
-/**
- * Attach a chat to the bot as its owner.
- *
- * The owner claims the bot by sending `/start <claim_code>`, where the code is
- * shown in the web panel. Rows created before claim codes existed have none, so
- * they fall back to the legacy rule (the first chat to press /start owns it) —
- * that keeps already-running bots working and self-heals on the next save.
- *
- * Returns true when this call performed the claim.
- */
-export async function maybeClaim(
-  env: Env,
-  cfg: BotConfigRow,
-  chatId: number | string,
-  telegramId: string,
-  code: string,
-): Promise<boolean> {
-  if (!telegramId) return false
-  if (String(cfg.chat_id ?? '')) return false // already owned — never re-claim
-  if (cfg.claim_code && code.trim() !== cfg.claim_code) return false
+// ── Public-bot tenants ───────────────────────────────────────────────────────
+//
+// The bot is a standalone deployment tool, open to everyone: it is NOT tied to a
+// panel account, so there is no owner/admin gate and no claim code. Every
+// Telegram user gets their own space — a unique access token (their personal
+// route/identity) plus an isolated, sign-in-less owner record for tokens and
+// deployments. One user can never see or deploy with another user's token.
 
-  await saveOwnerChat(env, cfg, chatId)
-  await env.DB.prepare('UPDATE bot_config SET claim_code = NULL, updated_at = ? WHERE id = ?')
-    .bind(nowIso(), cfg.id)
+const TENANT_COLUMNS = 'id, telegram_id, user_id, access_token, username, first_name'
+
+/** Personal tokens look like `mz-xxxxxxxxxxxx`. */
+function newTenantToken(): string {
+  return `mz-${genId().replace(/-/g, '').slice(0, 12)}`
+}
+
+/** Tenant by their unique token (deep links, `/start <token>`). */
+export async function tenantByToken(env: Env, token: string): Promise<BotTenant | null> {
+  return env.DB.prepare(`SELECT ${TENANT_COLUMNS} FROM bot_tenants WHERE access_token = ? LIMIT 1`)
+    .bind(token.trim())
+    .first<BotTenant>()
+}
+
+/**
+ * Resolve (or provision) the space of the Telegram user behind an update.
+ * The synthetic account is never given a usable password — it exists purely so
+ * the existing deploy engine, quota and token tables can hold this user's data.
+ */
+export async function resolveTenant(
+  env: Env,
+  telegramId: string,
+  profile: { username?: string | null; firstName?: string | null },
+): Promise<BotTenant> {
+  const existing = await env.DB.prepare(`SELECT ${TENANT_COLUMNS} FROM bot_tenants WHERE telegram_id = ?`)
+    .bind(telegramId)
+    .first<BotTenant>()
+  if (existing) {
+    await env.DB.prepare('UPDATE bot_tenants SET username = ?, first_name = ?, last_seen_at = ? WHERE id = ?')
+      .bind(profile.username ?? null, profile.firstName ?? null, nowIso(), existing.id)
+      .run()
+    return existing
+  }
+
+  const userId = genId()
+  const tenant: BotTenant = {
+    id: genId(),
+    telegram_id: telegramId,
+    user_id: userId,
+    access_token: newTenantToken(),
+    username: profile.username ?? null,
+    first_name: profile.firstName ?? null,
+  }
+  await env.DB.prepare(
+    "INSERT INTO users (id, email, password_hash, role, max_deployments, created_at) VALUES (?, ?, 'telegram-tenant', 'user', ?, ?)",
+  )
+    .bind(userId, `tg-${telegramId}@bot.local`, BOT_TENANT_QUOTA, nowIso())
     .run()
-  cfg.claim_code = null
-  await env.DB.prepare('INSERT INTO activity_logs (id, user_id, action, entity_type, entity_name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .bind(genId(), cfg.user_id, 'bot_owner_claimed', 'bot', `tg:${telegramId}`, nowIso())
+  await env.DB.prepare(
+    'INSERT INTO bot_tenants (id, telegram_id, user_id, access_token, username, first_name, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+  )
+    .bind(tenant.id, tenant.telegram_id, tenant.user_id, tenant.access_token, tenant.username, tenant.first_name, nowIso(), nowIso())
     .run()
-  return true
+  return tenant
 }
 
 const sessionKey = (userId: string, telegramId: string) => `${userId}:${telegramId}`
@@ -234,20 +320,41 @@ export async function trackUser(env: Env, cfg: BotConfigRow, tgId: string, usern
     .run()
 }
 
-export async function checkIsAdmin(env: Env, cfgUserId: string, telegramId: string): Promise<boolean> {
-  const row = await env.DB.prepare('SELECT is_admin FROM bot_users WHERE user_id = ? AND telegram_id = ?')
-    .bind(cfgUserId, telegramId)
-    .first<{ is_admin: number }>()
-  return !!row?.is_admin
+/**
+ * Has the panel owner closed this Telegram user's access?
+ *
+ * The deployer bot is open to everyone, so `bot_users.is_active` is the only
+ * control the owner keeps: blocking a user stops their updates from being
+ * processed at all (no deploys, no token writes) until they are unblocked.
+ */
+export async function isBotUserBlocked(env: Env, ownerUserId: string, telegramId: string): Promise<boolean> {
+  const row = await env.DB.prepare('SELECT is_active FROM bot_users WHERE user_id = ? AND telegram_id = ?')
+    .bind(ownerUserId, telegramId)
+    .first<{ is_active: number }>()
+  return !!row && !row.is_active
 }
 
-/** Owner chat for a user, or null when the bot has never been started. */
+/**
+ * Where a deployment's result notification should go.
+ *
+ * A panel account's own deployments notify its bot owner chat. Deployments made
+ * from the public bot belong to a Telegram tenant instead — those must be sent
+ * back to *that user*, never to the bot owner's chat.
+ */
 export async function ownerChat(env: Env, userId: string): Promise<{ bot_token: string; chat_id: string } | null> {
   const cfg = await env.DB.prepare('SELECT bot_token, chat_id FROM bot_config WHERE user_id = ? AND is_active = 1 LIMIT 1')
     .bind(userId)
     .first<{ bot_token: string; chat_id: string | null }>()
-  if (!cfg?.chat_id) return null
-  return { bot_token: cfg.bot_token, chat_id: cfg.chat_id }
+  if (cfg?.chat_id) return { bot_token: cfg.bot_token, chat_id: cfg.chat_id }
+  const tenant = await env.DB.prepare(
+    `SELECT bc.bot_token AS bot_token, bt.telegram_id AS telegram_id FROM bot_tenants bt
+     JOIN bot_config bc ON bc.is_active = 1
+     WHERE bt.user_id = ? ORDER BY bt.created_at DESC LIMIT 1`,
+  )
+    .bind(userId)
+    .first<{ bot_token: string; telegram_id: string }>()
+  if (tenant?.bot_token) return { bot_token: tenant.bot_token, chat_id: tenant.telegram_id }
+  return null
 }
 
 export const faDate = (iso: string | null | undefined): string => {

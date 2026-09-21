@@ -31,7 +31,7 @@ function makeDb() {
         bind: (...binds: unknown[]) => ({
           run: async () => exec(sql, binds),
           first: async <T>() => (exec(sql, binds, true) as Row | null) as T | null,
-          all: async <T>() => ({ results: [] as T[] }),
+          all: async <T>() => ({ results: execAll(sql, binds) as T[] }),
         }),
       }),
     },
@@ -103,6 +103,40 @@ function makeDb() {
     return asSelect ? null : { meta: { changes: 1 } }
   }
 
+  /** `.all()` — same WHERE matching as `exec`, but every matching row. */
+  function execAll(sql: string, binds: unknown[]): Row[] {
+    const sel = sql.match(/FROM (\w+)/)
+    if (!sel) return []
+    const t = tables[sel[1]]
+    if (!t) return []
+    const upper = sql.toUpperCase()
+    const cols = sql.slice(upper.indexOf('SELECT') + 6, upper.indexOf('FROM')).split(',').map((c) => c.trim())
+    const where = sql.match(/WHERE ([\s\S]*?)(?:ORDER BY|LIMIT|$)/)
+    const out: Row[] = []
+    for (const r of t.values()) {
+      if (where) {
+        const clauses = where[1].split(' AND ').map((c) => c.trim())
+        let ok = true
+        let bindIdx = 0
+        for (const clause of clauses) {
+          const m = clause.match(/(\w+)\s*=\s*\?/)
+          if (m) {
+            if (String(r[m[1]]) !== String(binds[bindIdx])) { ok = false; break }
+            bindIdx++
+          }
+        }
+        if (!ok) continue
+      }
+      const row: Row = {}
+      for (const c of cols) {
+        if (c.includes('(')) continue
+        row[c] = r[c]
+      }
+      out.push(row)
+    }
+    return out
+  }
+
   return db
 }
 
@@ -126,8 +160,8 @@ function args(data: string, sess: BotSession | null = session) {
     cfg,
     chatId: 100,
     telegramId: '100',
+    userId: 'u1',
     origin: 'https://panel.example.com',
-    isAdmin: true,
     session: sess,
     data,
   }

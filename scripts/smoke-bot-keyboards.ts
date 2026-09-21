@@ -58,6 +58,9 @@ function makeEnv(): Env {
 const run = async () => ({ meta: { changes: 1 } })
 
 async function first(sql: string, _binds: unknown[]): Promise<unknown> {
+  // The webhook now routes strictly by the per-bot setWebhook secret (no more
+  // "first active row" fallback), so the mock answers that lookup explicitly.
+  if (sql.includes('COUNT(*)')) return { c: 1 }
   if (sql.includes('FROM bot_config')) return CONFIG
   return null
 }
@@ -89,7 +92,7 @@ async function settle(ctx: { pending: Promise<unknown>[] }) {
 const request = (payload: unknown) =>
   new Request('https://panel.example.com/api/telegram/webhook', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': 'sec-1' },
     body: JSON.stringify(payload),
   })
 
@@ -171,7 +174,7 @@ async function main() {
   )
 
   console.log('\n۴) تب‌های دیگر هم دکمه دارند')
-  for (const tab of [MENU.dashboard, MENU.panels, MENU.tokens, MENU.servers, MENU.help]) {
+  for (const tab of [MENU.profile, MENU.panels, MENU.tokens, MENU.servers, MENU.help]) {
     calls.length = 0
     const ctx = makeCtx()
     await handleTelegramWebhook(env, ctx as any, request(textUpdate(tab)))

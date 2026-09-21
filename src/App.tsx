@@ -21,6 +21,15 @@ function ProtectedRoute({ children }: { children?: React.ReactNode }) {
   return <>{children}</>
 }
 
+/** The deployer-bot section belongs to the installation owner alone. */
+function OwnerRoute({ children }: { children?: React.ReactNode }) {
+  const { user, loading } = useAuth()
+  if (loading) return <div className="min-h-screen flex items-center justify-center"><div className="animate-pulse text-brand-400 text-lg">در حال بارگذاری...</div></div>
+  if (!user) return <Navigate to="/auth" replace />
+  if (!user.is_owner) return <Navigate to="/" replace />
+  return <>{children}</>
+}
+
 export default function App() {
   const { user, loading } = useAuth()
 
@@ -36,8 +45,8 @@ export default function App() {
         <Route path="tokens" element={<Tokens />} />
         <Route path="deployments" element={<Deployments />} />
         <Route path="deploy" element={<DeployWizard />} />
-        <Route path="bot-users" element={<BotUsers />} />
-        <Route path="bot-config" element={<BotConfig />} />
+        <Route path="bot-users" element={<OwnerRoute><BotUsers /></OwnerRoute>} />
+        <Route path="bot-config" element={<OwnerRoute><BotConfig /></OwnerRoute>} />
         <Route path="logs" element={<ActivityLogs />} />
         <Route path="optimizer" element={<Optimizer />} />
         <Route path="members" element={<Members />} />

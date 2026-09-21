@@ -7,17 +7,16 @@ import {
   Search,
   UserCheck,
   UserX,
-  Crown,
   Trash2,
-  Activity,
   TrendingUp,
+  Info,
 } from 'lucide-react'
 
 export default function BotUsers() {
   const [users, setUsers] = useState<BotUser[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [filter, setFilter] = useState<'all' | 'active' | 'inactive' | 'admin'>('all')
+  const [filter, setFilter] = useState<'all' | 'active' | 'blocked'>('all')
 
   const load = useCallback(async () => {
     try {
@@ -36,13 +35,8 @@ export default function BotUsers() {
     load()
   }
 
-  const handleToggleAdmin = async (user: BotUser) => {
-    try { await api(`/bot-users/${user.id}`, { method: 'PATCH', body: { is_admin: !user.is_admin } }) } catch { /* ignore */ }
-    load()
-  }
-
   const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`کاربر «${name}» حذف شود؟`)) return
+    if (!confirm(`«${name}» از لیست کاربران ربات حذف شود؟\nفضای استقرار، توکن‌ها و استقرارهای او پاک نمی‌شوند.`)) return
     try { await api(`/bot-users/${id}`, { method: 'DELETE' }) } catch { /* ignore */ }
     load()
   }
@@ -55,15 +49,14 @@ export default function BotUsers() {
     const matchFilter =
       filter === 'all' ? true :
       filter === 'active' ? u.is_active :
-      filter === 'inactive' ? !u.is_active :
-      filter === 'admin' ? u.is_admin : true
+      !u.is_active
     return matchSearch && matchFilter
   })
 
   const stats = {
     total: users.length,
     active: users.filter(u => u.is_active).length,
-    admins: users.filter(u => u.is_admin).length,
+    blocked: users.filter(u => !u.is_active).length,
     today: users.filter(u => {
       const d = new Date(u.created_at)
       const today = new Date()
@@ -79,7 +72,19 @@ export default function BotUsers() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-white">کاربران ربات</h1>
-        <p className="text-slate-400 text-sm mt-1">مانیتورینگ و مدیریت کاربران ربات تلگرام</p>
+        <p className="text-slate-400 text-sm mt-1">هر کسی که به ربات /start بدهد یک فضای استقرار جداگانه برای خودش می‌گیرد</p>
+      </div>
+
+      {/* What this list means — only the owner ever sees it */}
+      <div className="glass-card p-4 border-brand-500/30">
+        <div className="flex items-start gap-3">
+          <Info className="w-5 h-5 text-brand-400 shrink-0 mt-0.5" />
+          <p className="text-sm text-slate-300 leading-6">
+            ربات <b>عمومی و فقط برای استقرار</b> است: هر کاربر توکن و لینک اختصاصی خودش را دارد و استقرارها با
+            توکن خودِ او انجام می‌شود. تنها کنترل شما «مسدود کردن» است — کاربر مسدود هیچ صفحه‌ای نمی‌گیرد و
+            نمی‌تواند استقرار یا توکن ثبت کند.
+          </p>
+        </div>
       </div>
 
       {/* Stats */}
@@ -95,9 +100,9 @@ export default function BotUsers() {
           <p className="text-xs text-slate-400 mt-1">فعال</p>
         </div>
         <div className="stat-card">
-          <div className="p-2.5 rounded-xl bg-orange-500/10 inline-block mb-3"><Crown className="w-5 h-5 text-orange-400" /></div>
-          <p className="text-2xl font-bold text-white">{stats.admins}</p>
-          <p className="text-xs text-slate-400 mt-1">ادمین‌ها</p>
+          <div className="p-2.5 rounded-xl bg-error-500/10 inline-block mb-3"><UserX className="w-5 h-5 text-error-400" /></div>
+          <p className="text-2xl font-bold text-white">{stats.blocked}</p>
+          <p className="text-xs text-slate-400 mt-1">مسدود</p>
         </div>
         <div className="stat-card">
           <div className="p-2.5 rounded-xl bg-brand-500/10 inline-block mb-3"><TrendingUp className="w-5 h-5 text-brand-400" /></div>
@@ -120,7 +125,7 @@ export default function BotUsers() {
             />
           </div>
           <div className="flex gap-2">
-            {(['all', 'active', 'inactive', 'admin'] as const).map((f) => (
+            {(['all', 'active', 'blocked'] as const).map((f) => (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
@@ -128,7 +133,7 @@ export default function BotUsers() {
                   filter === f ? 'bg-brand-600 text-white' : 'bg-slate-800/50 text-slate-400 hover:text-white'
                 }`}
               >
-                {f === 'all' ? 'همه' : f === 'active' ? 'فعال' : f === 'inactive' ? 'غیرفعال' : 'ادمین‌ها'}
+                {f === 'all' ? 'همه' : f === 'active' ? 'فعال' : 'مسدود'}
               </button>
             ))}
           </div>
@@ -159,15 +164,12 @@ export default function BotUsers() {
                   <tr key={user.id} className="border-b border-slate-800/30 hover:bg-slate-800/30 transition-colors">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
-                        <div className={`w-9 h-9 rounded-full flex items-center justify-center text-white font-bold text-sm shrink-0 ${
-                          user.is_admin ? 'bg-gradient-to-br from-orange-500 to-orange-600' : 'bg-gradient-to-br from-brand-500 to-brand-700'
-                        }`}>
+                        <div className="w-9 h-9 rounded-full flex items-center justify-center text-white font-bold text-sm shrink-0 bg-gradient-to-br from-brand-500 to-brand-700">
                           {(user.first_name ?? user.username ?? '?')[0]?.toUpperCase()}
                         </div>
                         <div className="min-w-0">
                           <p className="text-sm text-white font-medium truncate">
                             {user.first_name} {user.last_name}
-                            {user.is_admin && <Crown className="inline w-3.5 h-3.5 text-orange-400 mr-1" />}
                           </p>
                           {user.username && <p className="text-xs text-slate-500 truncate" dir="ltr">@{user.username}</p>}
                         </div>
@@ -180,20 +182,25 @@ export default function BotUsers() {
                       <span className="text-xs text-slate-500">{user.last_activity ? new Date(user.last_activity).toLocaleString('fa-IR') : '—'}</span>
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`badge ${user.is_active ? 'bg-green-500/10 text-green-400' : 'bg-slate-700/30 text-slate-500'}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${user.is_active ? 'bg-green-400' : 'bg-slate-500'}`} />
-                        {user.is_active ? 'فعال' : 'غیرفعال'}
+                      <span className={`badge ${user.is_active ? 'bg-green-500/10 text-green-400' : 'bg-error-500/10 text-error-400'}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${user.is_active ? 'bg-green-400' : 'bg-error-400'}`} />
+                        {user.is_active ? 'فعال' : 'مسدود'}
                       </span>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
-                        <button onClick={() => handleToggle(user)} title={user.is_active ? 'غیرفعال کردن' : 'فعال کردن'} className="p-2 rounded-lg text-slate-400 hover:bg-slate-700/50 hover:text-white transition-colors">
+                        <button
+                          onClick={() => handleToggle(user)}
+                          title={user.is_active ? 'مسدود کردن دسترسی' : 'رفع مسدودی'}
+                          className="p-2 rounded-lg text-slate-400 hover:bg-slate-700/50 hover:text-white transition-colors"
+                        >
                           {user.is_active ? <UserX className="w-4 h-4" /> : <UserCheck className="w-4 h-4" />}
                         </button>
-                        <button onClick={() => handleToggleAdmin(user)} title="تغییر وضعیت ادمین" className="p-2 rounded-lg text-slate-400 hover:bg-orange-500/10 hover:text-orange-400 transition-colors">
-                          <Crown className="w-4 h-4" />
-                        </button>
-                        <button onClick={() => handleDelete(user.id, user.first_name ?? user.username ?? 'کاربر')} className="p-2 rounded-lg text-slate-400 hover:bg-error-500/10 hover:text-error-400 transition-colors">
+                        <button
+                          onClick={() => handleDelete(user.id, user.first_name ?? user.username ?? 'کاربر')}
+                          title="حذف از لیست"
+                          className="p-2 rounded-lg text-slate-400 hover:bg-error-500/10 hover:text-error-400 transition-colors"
+                        >
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>

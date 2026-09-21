@@ -54,7 +54,9 @@ export interface BotUser {
   username: string | null
   first_name: string | null
   last_name: string | null
+  /** Access is open to everyone; the owner can only block a user. */
   is_active: boolean
+  /** Legacy column from the old gate model — the deployer bot has no admins. */
   is_admin: boolean
   created_at: string
   last_activity: string | null
@@ -76,9 +78,9 @@ export interface BotConfig {
   webhook_url: string | null
   is_active: boolean
   welcome_message: string
-  /** Owner chat, set after the owner claims the bot with `/start <claim_code>`. */
+  /** Legacy column from the owner-claim flow; the public bot does not use it. */
   chat_id: string | null
-  /** One-time `/start <code>` code shown in the panel; null once claimed. */
+  /** Legacy column from the owner-claim flow; the public bot does not use it. */
   claim_code: string | null
   created_at: string
   updated_at: string

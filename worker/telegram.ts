@@ -2,29 +2,37 @@ import type { Env } from './env'
 import { replyKeyboard, routeCallback, routeText } from './telegram-ui'
 import {
   answerCb,
-  checkIsAdmin,
+  isBotUserBlocked,
   loadSession,
   notifyDeployment,
   notifyOptimizer,
   notifyQuotaLevel,
   renderScreen,
   resolveConfig,
+  resolveTenant,
   sendMsg,
   tg,
   trackUser,
+  type BotConfigRow,
+  type BotTenant,
   type Screen,
   type TgUpdate,
 } from './telegram-core'
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  Telegram webhook — the HTTP edge of the bot.
+//  Telegram webhook — the HTTP edge of the **public deployer bot**.
 //
-//  Everything the bot *knows* lives in worker/telegram-core.ts and every screen
-//  in worker/telegram-ui.ts. This file only authenticates the update, works out
-//  the caller's access level, hands it to the router and answers Telegram fast.
+//  The bot is not tied to a panel account: there is no owner to claim it, no
+//  access level to pass and no panel screen behind it. Every Telegram user who
+//  writes to it gets their own isolated space (a unique token + their own
+//  tokens and deployments), so the only job here is:
+//
+//    1. work out which bot the update belongs to (per-bot webhook secret),
+//    2. resolve/provision that user's space,
+//    3. hand the update to the router and answer Telegram immediately.
 //
 //  Telegram retries any webhook it considers slow, so the heavy work always runs
-//  inside ctx.waitUntil() and the response goes back immediately.
+//  inside ctx.waitUntil().
 // ══════════════════════════════════════════════════════════════════════════════
 
 // Re-exported so worker/index.ts, worker/deploy.ts and worker/members.ts keep a
@@ -33,23 +41,17 @@ export { notifyDeployment, notifyOptimizer, notifyQuotaLevel }
 
 /** Deep-link payloads: /start workers, /start deploy, … */
 const DEEP_LINKS: Record<string, string> = {
-  dashboard: 'n:status',
-  status: 'n:status',
   workers: 'l:workers:0',
   panels: 'l:panels:0',
   servers: 'l:servers:0',
   tokens: 'n:tokens',
   deploy: 'dpl:start',
+  profile: 'n:profile',
   help: 'n:help',
-  settings: 'n:settings',
 }
 
 /** Screens that come back with the persistent tab keyboard attached. */
-const MAIN_SCREENS = new Set([
-  'n:status', 'n:tokens', 'n:help', 'n:settings',
-  'l:workers:0', 'l:panels:0', 'l:servers:0',
-])
-
+const MAIN_SCREENS = new Set(['l:workers:0', 'l:panels:0', 'l:servers:0', 'n:tokens', 'n:profile'])
 
 /**
  * Telegram accepts a single `reply_markup` per message, so the persistent tab
@@ -84,6 +86,17 @@ function errorScreen(): Screen {
   }
 }
 
+/**
+ * The data scope every screen must use: the caller's own tenant space.
+ *
+ * `cfg` keeps the bot's own settings (token, welcome message) while `user_id`
+ * is swapped for the tenant's isolated owner record, so no query a screen makes
+ * can ever reach another user's — or a panel account's — tokens and deploys.
+ */
+function scopeToTenant(cfg: BotConfigRow, tenant: BotTenant): BotConfigRow {
+  return { ...cfg, user_id: tenant.user_id }
+}
+
 export async function handleTelegramWebhook(
   env: Env,
   ctx: ExecutionContext,
@@ -102,38 +115,63 @@ export async function handleTelegramWebhook(
   if (!cfg) return jsonOk()
   const bt = cfg.bot_token
 
+  const from = update.callback_query?.from ?? update.message?.from
+  const chatId: number | undefined = update.callback_query?.message?.chat?.id ?? update.message?.chat?.id
+  if (!from?.id || !chatId) return jsonOk()
+  const telegramId = String(from.id)
+
+  // Public deployer: provision (or refresh) this Telegram user's own space.
+  let tenant: BotTenant
+  try {
+    tenant = await resolveTenant(env, telegramId, { username: from.username ?? null, firstName: from.first_name ?? null })
+  } catch {
+    // Could not provision (transient D1 error) — retry on the next update.
+    return jsonOk()
+  }
+  // The owner's block list is the bot's only access control: a blocked user is
+  // answered once and never reaches a screen (so they can neither deploy nor
+  // write tokens).
+  if (await isBotUserBlocked(env, cfg.user_id, telegramId).catch(() => false)) {
+    ctx.waitUntil(
+      sendMsg(
+        bt,
+        chatId,
+        '🚫 <b>دسترسی شما به این ربات بسته شده است.</b>\n\nاگر فکر می‌کنید اشتباهی رخ داده، با مدیر پنل تماس بگیرید.',
+      ).catch(() => null),
+    )
+    return jsonOk()
+  }
+
+  const botCfg = scopeToTenant(cfg, tenant)
+  const shared = {
+    env,
+    exec: ctx,
+    cfg: botCfg,
+    telegramId,
+    userId: tenant.user_id,
+    tenant,
+    botUsername: cfg.bot_username ?? null,
+    origin,
+  }
+
   // ── Inline button presses ────────────────────────────────────────────────
   if (update.callback_query) {
     const cq = update.callback_query
-    const chatId = cq.message?.chat?.id
     const messageId = cq.message?.message_id ?? null
-    if (!chatId) return jsonOk()
-
-    const telegramId = String(cq.from?.id ?? '')
-    const data = cq.data ?? ''
-
     ctx.waitUntil(answerCb(bt, cq.id).catch(() => null))
     ctx.waitUntil(
       (async () => {
         try {
-          if (!telegramId) return
-          const isAdmin =
-            String(cfg.chat_id ?? '') === telegramId ||
-            (await checkIsAdmin(env, cfg.user_id, telegramId))
-          const session = await loadSession(env, cfg.user_id, telegramId)
+          const session = await loadSession(env, tenant.user_id, telegramId)
           const screen = await routeCallback({
-            env,
-            exec: ctx,
-            cfg,
+            ...shared,
             chatId,
-            telegramId,
-            origin,
-            isAdmin,
             session,
-            data,
+            data: cq.data ?? '',
           })
           if (screen) await renderScreen(bt, chatId, messageId, screen)
-        } catch {
+        } catch (err) {
+          console.error('telegram callback failed', err)
           await renderScreen(bt, chatId, messageId, errorScreen())
         }
       })(),
@@ -145,17 +183,11 @@ export async function handleTelegramWebhook(
   const message = update.message
   if (!message) return jsonOk()
 
-  const chatId = message.chat.id
-  const from = message.from
-  const telegramId = String(from?.id ?? '')
-
   // Anything that is not text gets a short nudge instead of silence.
   if (!message.text) {
-    if (telegramId) {
-      ctx.waitUntil(
-        sendMsg(bt, chatId, 'فقط پیام متنی پشتیبانی می‌شود. از منوی پایین استفاده کنید.', replyKeyboard()).catch(() => null),
-      )
-    }
+    ctx.waitUntil(
+      sendMsg(bt, chatId, 'فقط پیام متنی پشتیبانی می‌شود. از منوی پایین استفاده کنید.', replyKeyboard()).catch(() => null),
+    )
     return jsonOk()
   }
 
@@ -164,16 +196,11 @@ export async function handleTelegramWebhook(
   ctx.waitUntil(
     (async () => {
       try {
-        if (telegramId) {
-          await trackUser(env, cfg, telegramId, from?.username ?? null, from?.first_name ?? null, from?.last_name ?? null)
-        }
+        // Analytics for whoever connected this bot (the panel side's user list).
+        await trackUser(env, cfg, telegramId, from.username ?? null, from.first_name ?? null, from.last_name ?? null)
 
-        const isAdmin =
-          !!telegramId &&
-          (String(cfg.chat_id ?? '') === telegramId || (await checkIsAdmin(env, cfg.user_id, telegramId)))
-        const session = telegramId ? await loadSession(env, cfg.user_id, telegramId) : null
-
-        const args = { env, exec: ctx, cfg, chatId, telegramId, origin, isAdmin, session, data: '' }
+        const session = await loadSession(env, tenant.user_id, telegramId)
+        const args = { ...shared, chatId, session, data: '', messageId: message.message_id }
 
         await typing(bt, chatId).catch(() => null)
 
@@ -192,16 +219,15 @@ export async function handleTelegramWebhook(
         const screen = await routeText(args, text)
         if (!screen) return
 
-        // Routing may have just claimed the bot (via `/start <code>`), so the
-        // keyboard decision uses the post-routing ownership state.
-        const owns = isAdmin || String(cfg.chat_id ?? '') === telegramId
-        if (owns && (cmd === '/start' || text === '/menu' || text === '/quickstart')) {
+        // The tabs are installed once, with the main screens.
+        if (cmd === '/start' || text === '/menu' || text === '/quickstart' || MAIN_SCREENS.has(text)) {
           await installTabKeyboard(bt, chatId)
         }
         // A tab press just re-renders its screen; the tab keyboard is already on
         // screen, so the screen's own buttons must be sent untouched.
         await renderScreen(bt, chatId, null, screen)
-      } catch {
+      } catch (err) {
+        console.error('telegram update failed', err)
         await sendMsg(bt, chatId, errorScreen().text).catch(() => null)
       }
     })(),

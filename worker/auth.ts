@@ -50,8 +50,18 @@ export async function handleLogout(env: Env, request: Request): Promise<Response
   return json({ success: true })
 }
 
+/**
+ * The panel owner — the account that created this installation (the earliest
+ * one). Only the owner sees and manages the deployer bot; every other panel
+ * user and every additional admin is kept out of that section entirely.
+ */
+export async function isOwner(env: Env, userId: string): Promise<boolean> {
+  const first = await env.DB.prepare('SELECT id FROM users ORDER BY created_at, id LIMIT 1').first<{ id: string }>()
+  return !!first && first.id === userId
+}
+
 export async function handleMe(env: Env, request: Request): Promise<Response> {
   const user = await getUserFromRequest(env, request)
   if (!user) return apiError('نشست منقضی شده است', 401)
-  return json({ user })
+  return json({ user: { ...user, is_owner: await isOwner(env, user.id) } })
 }

@@ -33,7 +33,6 @@ export default function BotConfigPage() {
   const [hookInfo, setHookInfo] = useState<WebhookInfo | null>(null)
   const [checkingHook, setCheckingHook] = useState(false)
   const [reconnecting, setReconnecting] = useState(false)
-  const [claimCopied, setClaimCopied] = useState(false)
 
   /** Strip invisible Unicode (ZWNJ/RTL marks) + whitespace + optional "bot" prefix —
    *  Persian copy-paste often injects these and Telegram silently rejects the token. */
@@ -96,14 +95,6 @@ export default function BotConfigPage() {
     }
   }
 
-  const copyClaimCommand = () => {
-    if (config?.claim_code) {
-      navigator.clipboard.writeText(`/start ${config.claim_code}`)
-      setClaimCopied(true)
-      setTimeout(() => setClaimCopied(false), 2000)
-    }
-  }
-
   const checkWebhookInfo = async () => {
     setCheckingHook(true)
     try {
@@ -141,8 +132,8 @@ export default function BotConfigPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-white">ربات تلگرام</h1>
-        <p className="text-slate-400 text-sm mt-1">پیکربندی ربات تلگرام برای مدیریت از طریق چت</p>
+        <h1 className="text-2xl font-bold text-white">ربات استقرار تلگرام</h1>
+        <p className="text-slate-400 text-sm mt-1">فقط مالک پنل: یک ربات عمومی که هر کاربر با فضای اختصاصی خودش از آن استقرار می‌گیرد</p>
       </div>
 
       {/* Status banner */}
@@ -164,6 +155,19 @@ export default function BotConfigPage() {
           </button>
         </div>
       )}
+
+      {/* One public deployer bot; each Telegram user gets an isolated space */}
+      <div className="glass-card p-5 border-brand-500/30 space-y-3">
+        <h2 className="text-base font-bold text-white flex items-center gap-2">
+          <ShieldCheck className="w-5 h-5 text-brand-400" /> ربات عمومی استقرار (فقط مالک)
+        </h2>
+        <ul className="text-sm text-slate-300 space-y-2 leading-6 list-disc ps-5">
+          <li>این تب فقط برای <b>مالک پنل</b> است؛ کاربران و مدیران پنل آن را نمی‌بینند.</li>
+          <li>ربات یک <b>استقراردهندهٔ عمومی</b> است: هر کاربر تلگرام با <code>/start</code> فضای اختصاصی خودش را می‌گیرد و توکن، لینک و استقرارهایش از بقیه جداست.</li>
+          <li>هر کاربر توکن Cloudflare / Railway / Render خودش را در «🔑 توکن‌ها» داخل تلگرام اضافه می‌کند؛ استقرار با همان توکن انجام می‌شود، نه توکن شما.</li>
+          <li>ربات هیچ ارتباط دیگری با پنل ندارد — نه مدیریت کاربران پنل، نه دسترسی به داده‌های آن؛ فقط استقرار.</li>
+        </ul>
+      </div>
 
       {/* Config form */}
       <form onSubmit={handleSave} className="glass-card p-6 space-y-5">
@@ -290,42 +294,16 @@ export default function BotConfigPage() {
         </div>
       )}
 
-      {/* Owner claim */}
+      {/* Public deployer: no owner gate, no claim code */}
       <div className="glass-card p-6">
         <h2 className="text-lg font-bold text-white flex items-center gap-2 mb-3">
-          <ShieldCheck className="w-5 h-5 text-brand-400" /> اتصال مالک به ربات
+          <ShieldCheck className="w-5 h-5 text-brand-400" /> دسترسی ربات
         </h2>
-        {config?.chat_id ? (
-          <div className="flex items-center gap-3 p-4 rounded-xl bg-green-500/10 border border-green-500/30">
-            <Check className="w-5 h-5 text-green-400 shrink-0" />
-            <div>
-              <p className="text-sm text-white font-medium">مالک متصل است</p>
-              <p className="text-xs text-slate-400" dir="rtl">
-                ربات قفل است؛ فقط شما و ادمین‌هایی که تأیید می‌کنید به ورکرها و پنل‌ها دسترسی دارند.
-              </p>
-            </div>
-          </div>
-        ) : config?.claim_code ? (
-          <>
-            <p className="text-sm text-slate-400 leading-relaxed mb-3" dir="rtl">
-              ربات خصوصی است. برای اینکه به‌عنوان مالک شناخته شوید، این دستور را در تلگرام برای ربات بفرستید:
-            </p>
-            <div className="flex items-center gap-2 p-3 rounded-xl bg-slate-900/50 border border-brand-500/30">
-              <code className="flex-1 text-sm text-brand-200 font-mono truncate" dir="ltr">/start {config.claim_code}</code>
-              <button onClick={copyClaimCommand} className="p-1.5 rounded-lg text-slate-500 hover:text-white transition-colors">
-                {claimCopied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-              </button>
-            </div>
-            <p className="text-xs text-slate-500 mt-3" dir="rtl">
-              کد یک‌بار مصرف است و بلافاصله پس از اتصال باطل می‌شود. تا زمانی که متصل نشوید، هیچ‌کس دیگری به
-              داده‌های ربات دسترسی ندارد.
-            </p>
-          </>
-        ) : (
-          <p className="text-sm text-slate-400" dir="rtl">
-            برای ساخت کد اتصال، یک بار «ذخیرهٔ تنظیمات» را بزنید — کد همین‌جا نمایش داده می‌شود.
-          </p>
-        )}
+        <p className="text-sm text-slate-400 leading-relaxed" dir="rtl">
+          این ربات <b className="text-slate-200">عمومی و فقط برای استقرار</b> است و کد اتصال/قفل مالک ندارد: هر کاربر
+          تلگرام با فرستادن <code className="text-brand-200">/start</code> فضای اختصاصی خودش را می‌گیرد. هر کس فقط
+          توکن‌ها و استقرارهای خودش را می‌بیند و استقرارها با توکن خودِ او انجام می‌شود — نه توکن شما.
+        </p>
       </div>
 
       {/* Bot commands info */}

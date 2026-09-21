@@ -5,6 +5,8 @@ export interface User {
   id: string
   email: string
   role?: string
+  /** Only the installation owner may see and manage the deployer bot. */
+  is_owner?: boolean
 }
 
 interface AuthContextType {
