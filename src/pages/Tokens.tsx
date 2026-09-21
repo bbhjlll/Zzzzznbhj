@@ -19,6 +19,10 @@ import {
   Wand2,
   TrainFront,
 } from 'lucide-react'
+import { PANELS } from '../../shared/panels'
+
+/** The single first-party panel these tokens deploy (see shared/panels.ts). */
+const PANEL_NAME = PANELS[0].name
 
 const RAILWAY_TOKENS_PAGE = 'https://railway.com/account/tokens'
 const RENDER_TOKENS_PAGE = 'https://dashboard.render.com/account/api-keys'
@@ -64,7 +68,7 @@ export default function Tokens() {
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [visibleIds, setVisibleIds] = useState<Set<string>>(new Set())
 
-  // ── Railway tokens (StanNG auto-deploy) ──────────────────────────────
+  // ── Railway tokens (panel auto-deploy) ───────────────────────────────
   const [railTokens, setRailTokens] = useState<RailwayToken[]>([])
   const [railLoading, setRailLoading] = useState(true)
   const [railShowAdd, setRailShowAdd] = useState(false)
@@ -74,7 +78,7 @@ export default function Tokens() {
   const [railError, setRailError] = useState<string | null>(null)
   const [railSaved, setRailSaved] = useState(false)
 
-  // ── Render.com tokens (StanNG auto-deploy) ───────────────────────────
+  // ── Render.com tokens (panel auto-deploy) ────────────────────────────
   const [renderTokens, setRenderTokens] = useState<RenderToken[]>([])
   const [renderLoading, setRenderLoading] = useState(true)
   const [renderShowAdd, setRenderShowAdd] = useState(false)
@@ -374,14 +378,14 @@ export default function Tokens() {
         </div>
       )}
 
-      {/* ═══ Railway tokens — StanNG auto-deploy ═══ */}
+      {/* ═══ Railway tokens — panel auto-deploy ═══ */}
       <div className="pt-4 border-t border-slate-800/60">
         <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
           <div>
             <h2 className="text-xl font-bold text-white flex items-center gap-2">
               <TrainFront className="w-5 h-5 text-purple-400" /> توکن‌های Railway
             </h2>
-            <p className="text-slate-400 text-sm mt-1">استقرار خودکار StanNG v2 روی Railway — پروژه ساخته می‌شود، مخزن متصل و دیپلوی اجرا می‌شود</p>
+            <p className="text-slate-400 text-sm mt-1">استقرار خودکار {PANEL_NAME} روی Railway — پروژه ساخته می‌شود، مخزن متصل و دیپلوی اجرا می‌شود</p>
           </div>
           <button onClick={() => { setRailError(null); setRailSaved(false); setRailShowAdd(true) }} className="btn-primary flex items-center gap-2 bg-purple-600/80 hover:bg-purple-600">
             <Plus className="w-4 h-4" /> افزودن توکن Railway
@@ -417,7 +421,7 @@ export default function Tokens() {
               <TrainFront className="w-7 h-7 text-purple-400" />
             </div>
             <h3 className="text-base font-bold text-white mb-1">هنوز توکن Railway اضافه نشده</h3>
-            <p className="text-slate-400 text-sm">برای استقرار خودکار StanNG روی Railway یک توکن Account اضافه کنید</p>
+            <p className="text-slate-400 text-sm">برای استقرار خودکار {PANEL_NAME} روی Railway یک توکن Account اضافه کنید</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -457,14 +461,14 @@ export default function Tokens() {
         )}
       </div>
 
-      {/* ═══ Render.com tokens — StanNG auto-deploy ═══ */}
+      {/* ═══ Render.com tokens — panel auto-deploy ═══ */}
       <div className="pt-4 border-t border-slate-800/60">
         <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
           <div>
             <h2 className="text-xl font-bold text-white flex items-center gap-2">
               <Cloud className="w-5 h-5 text-teal-400" /> کلیدهای API رندر (Render.com)
             </h2>
-            <p className="text-slate-400 text-sm mt-1">استقرار خودکار StanNG v2 روی Render — Blueprint ساخته شده و سرویس Docker مستقر می‌شود</p>
+            <p className="text-slate-400 text-sm mt-1">استقرار خودکار {PANEL_NAME} روی Render — Blueprint ساخته شده و سرویس Docker مستقر می‌شود</p>
           </div>
           <button onClick={() => { setRenderError(null); setRenderSaved(false); setRenderShowAdd(true) }} className="btn-primary flex items-center gap-2 bg-teal-600/80 hover:bg-teal-600">
             <Plus className="w-4 h-4" /> افزودن کلید رندر
@@ -488,7 +492,7 @@ export default function Tokens() {
               <span className="text-xs font-mono text-slate-500">۲</span>
             </div>
             <h3 className="text-sm font-bold text-white mb-1">استقرار در ویزارد</h3>
-            <p className="text-xs text-slate-400 leading-relaxed">در صفحه استقرار روش <b>Render.com</b> را انتخاب کنید — سرویس Docker از مخزن stanngv2 ساخته و مستقر می‌شود.</p>
+            <p className="text-xs text-slate-400 leading-relaxed">در صفحه استقرار روش <b>Render.com</b> را انتخاب کنید — سرویس Docker از مخزن پنل اختصاصی ساخته و مستقر می‌شود.</p>
           </div>
         </div>
 
@@ -500,7 +504,7 @@ export default function Tokens() {
               <Cloud className="w-7 h-7 text-teal-400" />
             </div>
             <h3 className="text-base font-bold text-white mb-1">هنوز کلید API رندر اضافه نشده</h3>
-            <p className="text-slate-400 text-sm">برای استقرار خودکار StanNG روی Render یک کلید API بسازید و اضافه کنید</p>
+            <p className="text-slate-400 text-sm">برای استقرار خودکار {PANEL_NAME} روی Render یک کلید API بسازید و اضافه کنید</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

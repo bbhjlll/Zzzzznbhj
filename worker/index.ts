@@ -641,14 +641,14 @@ async function handleRouted(
     if (path === '/api/tokens' && method === 'POST') return await createToken(env, user.id, request)
     if (path.match(/^\/api\/tokens\/[^/]+$/) && method === 'DELETE') return await deleteToken(env, user.id, path.split('/')[3])
 
-    // ── Railway (StanNG auto-deploy) ─────────────────────────────────────
+    // ── Railway (catalog panel auto-deploy) ──────────────────────────────
     if (path === '/api/railway/tokens' && method === 'GET') return await listRailwayTokens(env, user.id)
     if (path === '/api/railway/tokens' && method === 'POST') return await createRailwayToken(env, user.id, request)
     if (path.match(/^\/api\/railway\/tokens\/[^/]+$/) && method === 'DELETE') return await deleteRailwayToken(env, user.id, path.split('/')[4])
     if (path === '/api/railway/deploy' && method === 'POST') return await handleRailwayDeploy(env, user.id, request)
     if (path === '/api/railway/status' && method === 'GET') return await handleRailwayStatus(env, user.id, url)
 
-    // ── Render.com (StanNG auto-deploy) ──────────────────────────────────
+    // ── Render.com (catalog panel auto-deploy) ───────────────────────────
     if (path === '/api/render/tokens' && method === 'GET') return await listRenderTokens(env, user.id)
     if (path === '/api/render/tokens' && method === 'POST') return await createRenderToken(env, user.id, request)
     if (path.match(/^\/api\/render\/tokens\/[^/]+$/) && method === 'DELETE') return await deleteRenderToken(env, user.id, path.split('/')[4])

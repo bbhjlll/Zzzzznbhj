@@ -130,7 +130,7 @@ npm run deploy     # بیلد فرانت + اسکیمای D1 (idempotent) + wran
 <tr><td><b>📦 R2</b></td><td>باکت R2 رایگان با هر استقرار خودکار ساخته و به ورکر متصل می‌شود — داده‌های سنگین از D1 خارج می‌شوند</td></tr>
 <tr><td><b>⚙️ gRPC/XHTTP</b></td><td>روشن‌کردن خودکار gRPC + WebSockets روی زون‌ها موقع استقرار — نودها بدون تداخل با کلودفلر کار می‌کنند</td></tr>
 <tr><td><b>⚡ سرعت</b></td><td>استاتیک‌ها از CDN لبه بدون اجرای ورکر + Smart Placement کنار D1 + کش immutable یک‌ساله</td></tr>
-<tr><td><b>🧩 چند زیرساخت</b></td><td>استقرار روی Cloudflare (Workers/Pages)، Railway، Render.com و هر VPS با Docker — با کاتالوگ پنل‌های آمادهٔ بررسی‌شده (StanNG v2، PXPANEL، 3X-UI، S-UI، PasarGuard، Remnawave) و تولید خودکار Dockerfile / docker-compose / railway.toml / render.yaml</td></tr>
+<tr><td><b>🧩 چند زیرساخت</b></td><td>استقرار روی Cloudflare (Workers/Pages)، Railway، Render.com و هر VPS با Docker — کاتالوگ استقرار فقط یک پنل دارد: <b>پنل اختصاصی ما</b> (NEXUS / Mizetusi) با تولید خودکار Dockerfile / docker-compose / railway.toml / render.yaml · سورس‌های ورکر کلودفلر کاتالوگ جدا و دست‌نخورده‌ای دارند</td></tr>
 <tr><td><b>🤖 ربات تلگرام</b></td><td>معماری سه‌لایه (<code>telegram-core</code> / <code>telegram-ui</code> / <code>telegram</code>) — کیبورد دائمی، صفحه‌های تک‌پیامی که درجا ویرایش می‌شوند، ویزارد استقرار ورکر کلودفلر **و استقرار پنل روی Railway/Render** (روش ← منبع/پنل ← توکن ← تأیید، با نمایش یک‌بار رمز ادمین و دکمهٔ بررسی زندهٔ وضعیت)، جست‌وجو، لینک‌های عمیق <code>?start=workers</code>، فضای اختصاصی هر کاربر تلگرام (<code>?start=&lt;token&gt;</code>) و اعلان لحظه‌ای پنل‌های Railway/Render</td></tr>
 <tr><td><b>🔐 ربات عمومی استقرار</b></td><td>یک ربات برای همه، ولی فضای هر کاربر جداست: هر کاربر تلگرام با <code>/start</code> یک توکن و لینک اختصاصی می‌گیرد و فقط توکن‌ها، ورکرها و استقرارهای خودش را می‌بیند. استقرارها با توکن Cloudflare/Railway/Render خودِ کاربر انجام می‌شود و توکن‌ها را می‌توان از داخل خود تلگرام (<code>🔑 توکن‌ها → ➕</code>) اضافه/غیرفعال/حذف کرد (اعتبارسنجی قبل از ذخیره + پاک‌کردن پیام حاوی توکن). تب ربات در پنل وب فقط برای مالک نمایش داده می‌شود (مالک با <code>OWNER_EMAIL</code> در <code>[vars]</code> فایل <code>wrangler.toml</code> مشخص می‌شود و اگر آن حساب ثبت‌نام نکرده باشد، اولین حساب پنل مالک می‌ماند) و بقیهٔ کاربران و مدیران پنل آن را نمی‌بینند؛ ربات هیچ بخش مدیریت پنل ندارد</td></tr>
 </table>
@@ -139,7 +139,9 @@ npm run deploy     # بیلد فرانت + اسکیمای D1 (idempotent) + wran
 
 ## 🧩 کاتالوگ پنل‌ها (Railway · Render.com · VPS)
 
-هر پنلی که می‌توان روی Railway، Render.com یا یک VPS داکری مستقر کرد، در یک فایل مشترک تعریف می‌شود:
+> **کاتالوگ استقرار فقط یک پنل دارد: پنل اختصاصی ما.** پنل‌های شخص ثالث (StanNG v2، PXPANEL، 3X-UI، S-UI، PasarGuard، Remnawave، Luffy، WG-Easy) به درخواست مالک حذف شدند و در `REMOVED_PANELS` داخل همان فایل با دلیل ثبت شده‌اند تا این تصمیم قابل ردیابی و برگشت‌پذیر بماند. کاتالوگ **سورس‌های ورکر کلودفلر** جداست (`shared/worker-sources.ts`) و دست‌نخورده باقی مانده است.
+
+پنلی که می‌توان روی Railway، Render.com یا یک VPS داکری مستقر کرد، در یک فایل مشترک تعریف می‌شود:
 
 ```
 shared/panels.ts
@@ -149,18 +151,13 @@ shared/panels.ts
 
 | پنل | مخزن | جامعه | نوع اجرا | مسیر پنل | پورت | هدف‌ها |
 |---|---|---|---|---|---|---|
-| **StanNG v2** | `youdidking/stanngv2` | 🌍 | Docker (Dockerfile مخزن) | `/login` | 8000 | Railway · Render · VPS |
-| **PXPANEL** | `iran-px-panel/pxpanel` | 🇮🇷 | Python / FastAPI | `/dashboard` | 8000 | Railway · Render · VPS |
-| **3X-UI** | `MHSanaei/3x-ui` | 🇮🇷 | Docker (ایمیج رسمی) | `/` | 2053 | VPS |
-| **S-UI** | `alireza0/s-ui` | 🇮🇷 | Docker (ایمیج رسمی) | `/app/` | 2095 (+2096) | VPS |
-| **PasarGuard** | `PasarGuard/panel` | 🇮🇷 | Docker + PostgreSQL | `/` | 8000 | VPS |
-| **Remnawave** | `remnawave/backend` | 🇷🇺 | Docker + PostgreSQL + Redis | `/` | 3000 | VPS |
-| **Luffy Panel** | `luffy-sh-op/LUFFY_PANEL` | 🌍 | Python / FastAPI (Procfile خودش) | `/` | 8000 | Railway · Render · VPS |
-| **WG-Easy** | `wg-easy/wg-easy` | 🌍 | Docker (WireGuard/AmneziaWG) | `/` | 51821 (+51820/udp) | VPS |
+| **پنل اختصاصی ما** (NEXUS / Mizetusi) | `miladjahani/Mizetusi` | 🇮🇷 | Docker (FastAPI + Xray-core) | `/login` | 8080 (+8443/tcp) | Railway · Render · VPS |
+
+حذف‌شده‌ها در `REMOVED_PANELS` (با دلیل) ثبت شده‌اند: `youdidking/stanngv2`، `iran-px-panel/pxpanel`، `MHSanaei/3x-ui`، `alireza0/s-ui`، `PasarGuard/panel`، `luffy-sh-op/LUFFY_PANEL`، `wg-easy/wg-easy`، `remnawave/backend`.
 
 ### پنل‌های اسکریپتی (نصب مستقیم روی VPS)
 
-بعضی پروژه‌ها مستقیم روی خود هاست نصب می‌شوند (systemd/SSH) و در قالب داکر بالا نمی‌آیند؛ این‌ها در `shared/vps-scripts.ts` هستند و ویزارد **دستور نصب رسمی تأییدشده‌شان** را نشان می‌دهد:
+بعضی پروژه‌ها مستقیم روی خود هاست نصب می‌شوند (systemd/SSH) و در قالب داکر بالا نمی‌آیند. این‌ها فقط به‌عنوان **مرجع داخلی** در `shared/vps-scripts.ts` ثبت شده‌اند و برنامه هیچ‌کدام را به‌عنوان پنل قابل استقرار پیشنهاد نمی‌کند (کاتالوگ استقرار همان یک پنل اختصاصی است):
 
 | پروژه | جامعه | روش | آخرین کامیت |
 |---|---|---|---|
@@ -170,7 +167,7 @@ shared/panels.ts
 
 > برندهایی که اسمشان زیاد شنیده می‌شود ولی **مخزن عمومی قابل‌تأییدی ندارند** (SLV، RVG، loofi، sanayii، solgx) و همچنین مخازن راکد/۴۰۴، در `EXCLUDED_REPOS`، `EXCLUDED_WORKER_SOURCES` و `UNVERIFIABLE_PANEL_BRANDS` با دلیل ثبت شده‌اند.
 
-**قاعدهٔ افزودن:** هر پنل فقط بعد از **بررسی زندهٔ مخزن** اضافه می‌شود. هر ورودی `lastCommit` (تاریخ آخرین کامیت بالادست) و `verifiedAt` (تاریخ بررسی) دارد و در ویزارد به‌صورت بج «✅ last upstream commit …» نمایش داده می‌شود. مخازنی که راکد بودند (مثلاً `Gozargah/Marzban` با آخرین کامیت ۲۰۲۵-۰۱-۰۹) در فهرست `EXCLUDED_REPOS` با دلیل ثبت شده‌اند تا حذف‌شدنشان تصادفی به نظر نرسد.
+**قاعدهٔ افزودن:** هر پنلی (از جمله پنل اختصاصی) فقط بعد از **بررسی زندهٔ مخزن** اضافه می‌شود. هر ورودی `lastCommit` (تاریخ آخرین کامیت بالادست) و `verifiedAt` (تاریخ بررسی) دارد و در ویزارد به‌صورت بج «✅ last upstream commit …» نمایش داده می‌شود. مخازنی که راکد بودند (مثلاً `Gozargah/Marzban` با آخرین کامیت ۲۰۲۵-۰۱-۰۹) در فهرست `EXCLUDED_REPOS` با دلیل ثبت شده‌اند تا حذف‌شدنشان تصادفی به نظر نرسد.
 
 برای هر پنل، ویزارد استقرار از این سه روش پشتیبانی می‌کند:
 

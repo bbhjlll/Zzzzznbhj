@@ -325,7 +325,7 @@ export default function BotConfigPage() {
             { cmd: '/config <name>', desc: 'دریافت لینک پنل، ساب و کانفیگ' },
             { cmd: '/sub <name>', desc: 'دریافت لینک اشتراک (ساب)' },
             { cmd: '/panel <name>', desc: 'دریافت لینک پنل ورکر' },
-            { cmd: '/panels', desc: 'پنل‌های آمادهٔ استقرار (StanNG v2، PXPANEL، LUFFY، 3X-UI، S-UI، PasarGuard، Remnawave، WG-Easy)' },
+            { cmd: '/panels', desc: 'پنل اختصاصی آمادهٔ استقرار روی Railway، Render و VPS' },
             { cmd: '/servers', desc: 'پنل‌های مستقرشده روی Railway و Render' },
             { cmd: '/configs', desc: 'کانفیگ‌ها و ساب‌های آماده' },
             { cmd: '/members', desc: 'کاربران ساب و سهمیهٔ مصرف' },

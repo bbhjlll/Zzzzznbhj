@@ -124,18 +124,24 @@ async function main() {
     if (ok) { pass++; console.log(`  ✓ ${name}`) } else { fail++; console.log(`  ✗ ${name} ${extra}`) }
   }
 
-  const panel = (await import('../shared/panels')).resolvePanel('stanngv2')
+  // The catalog holds one panel (see shared/panels.ts); resolve it by id so the
+  // test still fails loudly if the id ever changes.
+  const panel = (await import('../shared/panels')).resolvePanel('mizetusi')
+  if (panel.id !== 'mizetusi') {
+    console.error(`panel catalog changed: expected mizetusi, got ${panel.id}`)
+    process.exit(1)
+  }
 
   console.log('1) invalid name rejected')
   let r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'Bad Name!', panel })
   check('invalid name', !r.ok)
 
   console.log('2) platform mismatch rejected')
-  const vpsOnly = (await import('../shared/panels')).PANELS.find((p) => !p.targets.includes('railway') && !p.targets.includes('render'))
-  if (vpsOnly) {
-    r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'ok-name', panel: vpsOnly })
-    check('vps-only panel rejected', !r.ok && r.error.includes('VPS'))
-  }
+  // The shipped panel supports railway+render, so derive a VPS-only variant from
+  // it to exercise the guard (a Railway token on a VPS-only panel).
+  const vpsOnly = { ...panel, targets: ['vps'] as typeof panel.targets }
+  r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'ok-name', panel: vpsOnly })
+  check('vps-only panel rejected', !r.ok && r.error.includes('VPS'))
 
   console.log('3) railway happy path')
   gqlQueue = [
@@ -145,7 +151,8 @@ async function main() {
     { serviceCreate: { id: 'svc1' } },                              // serviceCreate
     {},                                                             // instanceUpdate
     { serviceDomainCreate: { domain: 'my-app.up.railway.app' } },   // domain
-    {}, {}, {},                                                     // variableUpserts (PORT/ADMIN/SECRET)
+    {}, {}, {},                                                     // variableUpserts (PORT/ADMIN_PASSWORD/JWT_SECRET)
+    {},                                                             // variableUpserts (SQLITE_PATH)
     { serviceInstanceDeployV2: 'dep1' },                            // deploy trigger
   ]
   r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'my-app', panel })
@@ -168,8 +175,11 @@ async function main() {
     check('creds surfaced', w1.adminPassword === env.tables.railway_deploys.get('dep1')?.['admin_password'])
     check('panel path attached', w1.panelPath === panel.panelPath)
   }
+  // Bootstrap runs only for panels that declare a setup endpoint; the shipped
+  // panel configures itself from env vars, so it expects zero POSTs.
+  const expectedSetupPosts = panel.setupPath ? 1 : 0
   const setupCalls = calls.filter((c) => c.url.includes('my-app.up.railway.app') && c.method === 'POST')
-  check('setup POST made once', setupCalls.length === 1, `got ${setupCalls.length}`)
+  check(`setup POSTs on first poll (${expectedSetupPosts})`, setupCalls.length === expectedSetupPosts, `got ${setupCalls.length}`)
   const afterRow = env.tables.railway_deploys.get('dep1')
   check('setup_done flipped', afterRow?.['setup_done'] === 1, `row=${JSON.stringify(afterRow)}`)
 
@@ -179,21 +189,13 @@ async function main() {
   check('still live', w2.state === 'live')
   check('firstLive=false', w2.state === 'live' && w2.firstLive === false)
   const setupCalls2 = calls.filter((c) => c.url.includes('my-app.up.railway.app') && c.method === 'POST')
-  check('no repeat setup POST', setupCalls2.length === 1, `got ${setupCalls2.length}`)
+  check('no repeat setup POST', setupCalls2.length === expectedSetupPosts, `got ${setupCalls2.length}`)
 
-  console.log('6) render token on a railway panel → mismatch error')
-  const renderOnlyPanel = (await import('../shared/panels')).PANELS.find((p) => p.targets.includes('render') && !p.targets.includes('railway'))
-  void renderOnlyPanel
-  r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rd1', name: 'cross-app', panel })
-  // stanngv2 supports both railway+render, so with a render token it should try Render.
-  // Instead test the true mismatch: railway-only panel with render token.
-  const railOnlyPanel = (await import('../shared/panels')).PANELS.find((p) => p.targets.includes('railway') && !p.targets.includes('render'))
-  if (railOnlyPanel) {
-    r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rd1', name: 'cross-app', panel: railOnlyPanel })
-    check('railway-only panel + render key rejected', !r.ok && r.error.includes('Render'))
-  } else {
-    console.log('  (no railway-only panel in catalog — skipped)')
-  }
+  console.log('6) render token on a railway-only panel → mismatch error')
+  // Same trick the other way round: a railway-only variant must reject a Render key.
+  const railOnlyPanel = { ...panel, targets: ['railway'] as typeof panel.targets }
+  r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rd1', name: 'cross-app', panel: railOnlyPanel })
+  check('railway-only panel + render key rejected', !r.ok && r.error.includes('Render'))
 
   console.log(`\n${pass} passed, ${fail} failed`)
   globalThis.fetch = realFetch

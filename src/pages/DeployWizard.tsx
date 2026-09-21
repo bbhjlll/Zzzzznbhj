@@ -20,6 +20,15 @@ import {
 import JSZip from 'jszip'
 import { generateDockerCompose, generateNginxConf, generateEnvFile, generateDeployScript, generateRailwayDockerfile, generateRailwayToml, generateRailwayReadme } from '../lib/vps-deploy'
 import type { CFToken, RailwayToken, RenderToken } from '../lib/types'
+import { PANELS } from '../../shared/panels'
+
+/**
+ * The panel this wizard installs. The catalog ships a single, first-party panel
+ * (see shared/panels.ts), so every label, port, path and generated file below is
+ * derived from it — nothing panel-specific is hardcoded here any more.
+ */
+const PANEL = PANELS[0]
+const PANEL_PORT = String(PANEL.port)
 
 function genUuid() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
@@ -60,11 +69,18 @@ export default function DeployWizard() {
   const [deployLogs, setDeployLogs] = useState<string[]>([])
   const [deployResult, setDeployResult] = useState<{ success: boolean; message: string; url?: string; panelUrl?: string } | null>(null)
 
-  // ── Railway auto-deploy (StanNG via Railway Public API) ────────────────
+  // ── Railway auto-deploy (panel via the Railway Public API) ─────────────
   const [railTokens, setRailTokens] = useState<RailwayToken[]>([])
   const [railTokenId, setRailTokenId] = useState('')
   const [railMode, setRailMode] = useState<'auto' | 'zip'>('auto')
   const [cfBypass, setCfBypass] = useState(false)
+  // Panel methods install the catalog panel; the Cloudflare methods install a
+  // worker source. Keeping `workerSource` in sync with the chosen method means
+  // the dropdown, the payload and the generated files always agree.
+  const chooseMethod = (m: typeof method) => {
+    setMethod(m)
+    setWorkerSource(m === 'vps' || m === 'railway' || m === 'render' ? PANEL.id : 'edgetunnel')
+  }
   const [railProjectUrl, setRailProjectUrl] = useState<string | null>(null)
   const [newRailName, setNewRailName] = useState('railway-main')
   const [newRailToken, setNewRailToken] = useState('')
@@ -75,7 +91,7 @@ export default function DeployWizard() {
   const [renderTokens, setRenderTokens] = useState<RenderToken[]>([])
   const [renderTokenId, setRenderTokenId] = useState('')
   const [renderProjectUrl, setRenderProjectUrl] = useState<string | null>(null)
-  const [newRenderName, setNewRenderName] = useState('stanng-main')
+  const [newRenderName, setNewRenderName] = useState(`${PANEL.id}-main`)
   const [newRenderToken, setNewRenderToken] = useState('')
   const [renderSaving, setRenderSaving] = useState(false)
   const [renderSaveError, setRenderSaveError] = useState<string | null>(null)
@@ -145,7 +161,7 @@ export default function DeployWizard() {
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // One-time StanNG admin credentials returned by the Railway deploy call —
+  // One-time panel admin credentials returned by the Railway deploy call —
   // kept in a ref so the status poller can label the result when it succeeds.
   const railAdminRef = useRef<{ user: string; pass: string } | null>(null)
 
@@ -248,10 +264,10 @@ export default function DeployWizard() {
           setDeployResult({
             success: true,
             message: url
-              ? 'StanNG با موفقیت روی Render مستقر شد! 🎉'
+              ? `${PANEL.name} با موفقیت روی Render مستقر شد! 🎉`
               : 'استقرار روی Render موفق بود — دامنه را در داشبورد سرویس فعال کنید.',
             url: url ?? undefined,
-            panelUrl: url ? `${url.replace(/\/+$/, '')}/login` : undefined,
+            panelUrl: url ? `${url.replace(/\/+$/, '')}${PANEL.panelPath}` : undefined,
           })
         } else if (st === 'FAILED' || st === 'CANCELED' || st === 'DEACTIVATED') {
           stopPolling()
@@ -298,11 +314,11 @@ export default function DeployWizard() {
             success: true,
             message: url
               ? (admin
-                  ? 'StanNG در آمریکا مستقر شد و ادمین پنل ساخته شد! 🎉'
-                  : 'StanNG با موفقیت روی Railway مستقر شد! 🎉')
+                  ? `${PANEL.name} در آمریکا مستقر شد و ادمین پنل ساخته شد! 🎉`
+                  : `${PANEL.name} با موفقیت روی Railway مستقر شد! 🎉`)
               : 'استقرار روی Railway موفق بود — دامنه را در بخش Networking پروژه فعال کنید.',
             url: url ?? undefined,
-            panelUrl: url ? `${url.replace(/\/+$/, '')}/login` : undefined,
+            panelUrl: url ? `${url.replace(/\/+$/, '')}${PANEL.panelPath}` : undefined,
           })
         } else if (st === 'FAILED' || st === 'CRASHED') {
           stopPolling()
@@ -353,14 +369,14 @@ export default function DeployWizard() {
       try {
         const { data } = await api<{ data: { serviceId: string; deployId: string; dashboardUrl: string } }>('/render/deploy', {
           method: 'POST',
-          body: { token_id: rt.id, name },
+          body: { token_id: rt.id, name, panel: PANEL.id },
         })
         setRenderProjectUrl(data.dashboardUrl)
         setDeployLogs([
           '✓ کلید API رندر تأیید شد',
           '✓ Blueprint ساخته شد',
-          '✓ سرویس Docker از مخزن stanngv2 متصل شد',
-          '✓ PORT=8000 تنظیم شد',
+          `✓ سرویس Docker از مخزن ${PANEL.repo} متصل شد`,
+          `✓ PORT=${PANEL_PORT} تنظیم شد`,
           `✓ استقرار شروع شد (${data.deployId.slice(0, 8)}…)`,
           '',
           'در حال بیلد و استقرار روی Render — معمولاً ۳ تا ۶ دقیقه.',
@@ -384,7 +400,7 @@ export default function DeployWizard() {
       try {
         const { data } = await api<{ data: { deploymentId: string; projectId: string; projectUrl: string; domain?: string; admin_username?: string; admin_password?: string } }>('/railway/deploy', {
           method: 'POST',
-          body: { token_id: rt.id, name, region: 'us-west2' },
+          body: { token_id: rt.id, name, region: 'us-west2', panel: PANEL.id },
         })
         setRailProjectUrl(data.projectUrl)
         if (data.admin_username && data.admin_password) {
@@ -393,10 +409,10 @@ export default function DeployWizard() {
         setDeployLogs([
           '✓ پروژه ساخته شد',
           '✓ محیط production آماده شد',
-          '✓ مخزن stanngv2 (GitHub) متصل شد',
+          `✓ مخزن ${PANEL.repo} (GitHub) متصل شد`,
           '✓ منطقه: آمریکا (us-west2)',
           ...(data.domain ? [`✓ دامنه: ${data.domain}`] : []),
-          '✓ PORT=8000 تنظیم شد',
+          `✓ PORT=${PANEL_PORT} تنظیم شد`,
           `✓ استقرار شروع شد (${data.deploymentId.slice(0, 8)}…)`,
           '',
           'در حال بیلد و استقرار روی Railway — معمولاً ۲ تا ۵ دقیقه.',
@@ -416,8 +432,8 @@ export default function DeployWizard() {
       const isRailway = method === 'railway'
       setDeployLogs([isRailway ? 'در حال تولید فایل‌های Railway...' : 'در حال تولید فایل‌های Docker...'])
       try {
-        const vpsPort = '8080'
-        const cfg = { name, uuid, adminPassword: adminPassword || uuid, domain: '', port: vpsPort }
+        const vpsPort = PANEL_PORT
+        const cfg = { name, uuid, adminPassword: adminPassword || uuid, domain: '', port: vpsPort, panel: PANEL.id }
         const zip = new JSZip()
         if (isRailway) {
           zip.file('Dockerfile', generateRailwayDockerfile(cfg))
@@ -428,13 +444,13 @@ export default function DeployWizard() {
           zip.file('nginx.conf', generateNginxConf(cfg))
           zip.file('.env', generateEnvFile(cfg))
           zip.file('deploy.sh', generateDeployScript(cfg))
-          zip.file('README.md', `# ${name} — StanNG v2 Docker Deployment\n\n## Quick Start\n\n1. Upload this ZIP to your VPS\n2. Extract: \`unzip ${name}-stanng.zip\`\n3. Run: \`bash deploy.sh\`\n\n## Panel Access\n\n- URL: http://YOUR_SERVER_IP:8080/login\n- Password: \`${adminPassword || uuid}\`\n\n---\nGenerated by miliconfigpro panel\n`)
+          zip.file('README.md', `# ${name} — ${PANEL.name} Docker Deployment\n\n## Quick Start\n\n1. Upload this ZIP to your VPS\n2. Extract: \`unzip ${name}-${PANEL.id}.zip\`\n3. Run: \`bash deploy.sh\`\n\n## Panel Access\n\n- URL: http://YOUR_SERVER_IP:${PANEL_PORT}${PANEL.panelPath}\n- Password: \`${adminPassword || uuid}\`\n\n---\nGenerated by miliconfigpro panel\n`)
         }
         const blob = await zip.generateAsync({ type: 'blob' })
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `${name}-stanng.zip`
+        a.download = `${name}-${PANEL.id}.zip`
         a.click()
         URL.revokeObjectURL(url)
         setDeployLogs([
@@ -451,7 +467,7 @@ export default function DeployWizard() {
             `README.md ✓`,
           ]),
           '',
-          `📦 ${name}-stanng.zip — ${blob.size} bytes`,
+          `📦 ${name}-${PANEL.id}.zip — ${blob.size} bytes`,
           '',
           'برای استقرار:',
           ...(isRailway ? [
@@ -460,12 +476,12 @@ export default function DeployWizard() {
             '3. Deploy from GitHub → مخزن را انتخاب کنید',
           ] : [
             '1. ZIP را به VPS آپلود کنید',
-            '2. استخراج: unzip ' + name + '-stanng.zip',
+            '2. استخراج: unzip ' + name + `-${PANEL.id}.zip`,
             '3. اجرا: bash deploy.sh',
           ]),
         ])
         setDeploying(false)
-        setDeployResult({ success: true, message: isRailway ? 'فایل‌های Railway تولید و دانلود شدند!' : 'فایل‌های Docker تولید و دانلود شدند!', url: isRailway ? 'https://your-app.up.railway.app' : `http://YOUR_SERVER_IP:${vpsPort}`, panelUrl: isRailway ? 'https://your-app.up.railway.app/login' : `http://YOUR_SERVER_IP:${vpsPort}/login` })
+        setDeployResult({ success: true, message: isRailway ? 'فایل‌های Railway تولید و دانلود شدند!' : 'فایل‌های Docker تولید و دانلود شدند!', url: isRailway ? 'https://your-app.up.railway.app' : `http://YOUR_SERVER_IP:${vpsPort}`, panelUrl: isRailway ? `https://your-app.up.railway.app${PANEL.panelPath}` : `http://YOUR_SERVER_IP:${vpsPort}${PANEL.panelPath}` })
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'خطای تولید فایل'
         setDeployResult({ success: false, message: msg })
@@ -512,7 +528,7 @@ export default function DeployWizard() {
     return <div className="flex items-center justify-center h-96"><Loader2 className="w-8 h-8 animate-spin text-brand-400" /></div>
   }
 
-  // Users without a Cloudflare token may still deploy StanNG (Railway/VPS).
+  // Users without a Cloudflare token may still deploy the panel (Railway/VPS).
   const needCfGate = tokens.length === 0 && !cfBypass
 
   if (needCfGate) {
@@ -520,7 +536,7 @@ export default function DeployWizard() {
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold text-white">استقرار ورکر جدید</h1>
-          <p className="text-slate-400 text-sm mt-1">{method === 'railway' ? 'فایل‌های Railway (Dockerfile + railway.toml) برای استقرار StanNG تولید و دانلود می‌شوند' : method === 'vps' ? 'فایل‌های Docker برای استقرار StanNG روی VPS تولید و دانلود می‌شوند' : 'ورکر به‌صورت خودکار از مخزن دانلود و روی کلودفلر مستقر می‌شود — نیازی به کدنویسی نیست'}</p>
+          <p className="text-slate-400 text-sm mt-1">{method === 'railway' ? 'فایل‌های Railway (Dockerfile + railway.toml) برای استقرار پنل تولید و دانلود می‌شوند' : method === 'vps' ? 'فایل‌های Docker برای استقرار پنل روی VPS تولید و دانلود می‌شوند' : 'ورکر به‌صورت خودکار از مخزن دانلود و روی کلودفلر مستقر می‌شود — نیازی به کدنویسی نیست'}</p>
         </div>
 
         <div className="glass-card p-12 text-center">
@@ -529,19 +545,19 @@ export default function DeployWizard() {
           <p className="text-slate-400 text-sm mb-6">برای استقرار ورکرها به توکن API کلودفلر نیاز دارید</p>
           <button onClick={() => navigate('/tokens')} className="btn-primary">رفتن به مدیریت توکن</button>
           <div className="mt-5 pt-5 border-t border-slate-800/50">
-            <p className="text-xs text-slate-500 mb-3">توکن کلودفلر ندارید؟ StanNG (پنل VLESS با xray-core) را می‌توانید بدون توکن کلودفلر روی Railway یا VPS خودتان مستقر کنید:</p>
+            <p className="text-xs text-slate-500 mb-3">توکن کلودفلر ندارید؟ پنل اختصاصی (FastAPI + xray-core) را می‌توانید بدون توکن کلودفلر روی Railway یا VPS خودتان مستقر کنید:</p>
             <div className="flex flex-col sm:flex-row gap-2">
             <button
-              onClick={() => { setMethod('railway'); setRailMode('auto'); setCfBypass(true) }}
+              onClick={() => { chooseMethod('railway'); setRailMode('auto'); setCfBypass(true) }}
               className="btn-ghost inline-flex items-center gap-2"
             >
-              <TrainFront className="w-4 h-4 text-purple-400" /> استقرار StanNG روی Railway
+              <TrainFront className="w-4 h-4 text-purple-400" /> استقرار پنل روی Railway
             </button>
             <button
-              onClick={() => { setMethod('render'); setCfBypass(true) }}
+              onClick={() => { chooseMethod('render'); setCfBypass(true) }}
               className="btn-ghost inline-flex items-center gap-2"
             >
-              <Cloud className="w-4 h-4 text-teal-400" /> استقرار StanNG روی Render.com
+              <Cloud className="w-4 h-4 text-teal-400" /> استقرار پنل روی Render.com
             </button>
           </div>
           </div>
@@ -596,7 +612,7 @@ export default function DeployWizard() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-white">استقرار ورکر جدید</h1>        <p className="text-slate-400 text-sm mt-1">{method === 'render' ? 'استقرار خودکار StanNG v2 روی Render.com — سرویس Docker از مخزن ساخته و مستقر می‌شود' : method === 'railway' && railMode === 'auto' ? 'استقرار خودکار StanNG v2 روی Railway — پروژه ساخته، مخزن متصل و دیپلوی اجرا می‌شود' : method === 'railway' ? 'فایل‌های Railway (Dockerfile + railway.toml) برای استقرار StanNG تولید و دانلود می‌شوند' : method === 'vps' ? 'فایل‌های Docker برای استقرار StanNG روی VPS تولید و دانلود می‌شوند' : 'ورکر به‌صورت خودکار از مخزن دانلود و روی کلودفلر مستقر می‌شود — نیازی به کدنویسی نیست'}</p>
+        <h1 className="text-2xl font-bold text-white">استقرار ورکر جدید</h1>        <p className="text-slate-400 text-sm mt-1">{method === 'render' ? 'استقرار خودکار پنل روی Render.com — سرویس Docker از مخزن ساخته و مستقر می‌شود' : method === 'railway' && railMode === 'auto' ? 'استقرار خودکار پنل روی Railway — پروژه ساخته، مخزن متصل و دیپلوی اجرا می‌شود' : method === 'railway' ? 'فایل‌های Railway (Dockerfile + railway.toml) برای استقرار پنل تولید و دانلود می‌شوند' : method === 'vps' ? 'فایل‌های Docker برای استقرار پنل روی VPS تولید و دانلود می‌شوند' : 'ورکر به‌صورت خودکار از مخزن دانلود و روی کلودفلر مستقر می‌شود — نیازی به کدنویسی نیست'}</p>
         </div>
 
         {/* Info banner */}
@@ -606,7 +622,7 @@ export default function DeployWizard() {
           </div>
           <div>
             <p className="text-sm text-white font-medium">{method === 'railway' && railMode === 'auto' ? 'استقرار خودکار روی Railway' : method === 'render' ? 'استقرار خودکار روی Render.com' : 'استقرار کاملاً خودکار'}</p>
-            <p className="text-xs text-slate-400">{method === 'render' ? 'با کلید API شما یک Blueprint ساخته می‌شود، سرویس Docker از مخزن عمومی stanngv2 (با Dockerfile رسمی شامل xray-core و nginx) بیلد و مستقر می‌گردد — وضعیت همین‌جا دنبال می‌شود.' : method === 'railway' && railMode === 'auto' ? 'با توکن Account شما پروژه‌ای در Railway ساخته می‌شود، سرویس از مخزن عمومی stanngv2 ساخته شده و Docker بیلد و مستقر می‌گردد — وضعیت همین‌جا دنبال می‌شود.' : method === 'railway' ? 'فایل‌های Dockerfile و railway.toml تولید و به‌صورت ZIP دانلود می‌شوند. سپس در Railway از GitHub مستقر کنید.' : method === 'vps' ? 'فایل‌های docker-compose.yml، nginx.conf، .env و deploy.sh تولید و به‌صورت ZIP دانلود می‌شوند.' : 'کد ورکر از مخزن GitHub بارگذاری می‌شود، KV ساخته می‌شود، bindings تنظیم می‌شود و ورکر روی edge مستقر می‌گردد.'}</p>
+            <p className="text-xs text-slate-400">{method === 'render' ? 'با کلید API شما یک Blueprint ساخته می‌شود، سرویس Docker از مخزن عمومی miladjahani/Mizetusi (با Dockerfile رسمی شامل xray-core و پنل) بیلد و مستقر می‌گردد — وضعیت همین‌جا دنبال می‌شود.' : method === 'railway' && railMode === 'auto' ? 'با توکن Account شما پروژه‌ای در Railway ساخته می‌شود، سرویس از مخزن عمومی miladjahani/Mizetusi ساخته شده و Docker بیلد و مستقر می‌گردد — وضعیت همین‌جا دنبال می‌شود.' : method === 'railway' ? 'فایل‌های Dockerfile و railway.toml تولید و به‌صورت ZIP دانلود می‌شوند. سپس در Railway از GitHub مستقر کنید.' : method === 'vps' ? 'فایل‌های docker-compose.yml، nginx.conf، .env و deploy.sh تولید و به‌صورت ZIP دانلود می‌شوند.' : 'کد ورکر از مخزن GitHub بارگذاری می‌شود، KV ساخته می‌شود، bindings تنظیم می‌شود و ورکر روی edge مستقر می‌گردد.'}</p>
           </div>
         </div>
 
@@ -793,7 +809,7 @@ export default function DeployWizard() {
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
                 <button
                   type="button"
-                  onClick={() => setMethod('workers')}
+                  onClick={() => chooseMethod('workers')}
                   className={`p-4 rounded-xl border text-right transition-all ${
                     method === 'workers' ? 'border-brand-500 bg-brand-500/10' : 'border-slate-700 bg-slate-900/40 hover:border-slate-600'
                   }`}
@@ -804,7 +820,7 @@ export default function DeployWizard() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setMethod('pages')}
+                  onClick={() => chooseMethod('pages')}
                   className={`p-4 rounded-xl border text-right transition-all ${
                     method === 'pages' ? 'border-brand-500 bg-brand-500/10' : 'border-slate-700 bg-slate-900/40 hover:border-slate-600'
                   }`}
@@ -815,36 +831,36 @@ export default function DeployWizard() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setMethod('vps')}
+                  onClick={() => chooseMethod('vps')}
                   className={`p-4 rounded-xl border text-right transition-all ${
                     method === 'vps' ? 'border-brand-500 bg-brand-500/10' : 'border-slate-700 bg-slate-900/40 hover:border-slate-600'
                   }`}
                 >
                   <Terminal className={`w-5 h-5 mb-2 ${method === 'vps' ? 'text-brand-400' : 'text-slate-500'}`} />
                   <p className="text-sm font-bold text-white">VPS (Docker)</p>
-                  <p className="text-xs text-slate-400 mt-1">سرور اختصاصی. StanNG.</p>
+                  <p className="text-xs text-slate-400 mt-1">سرور اختصاصی روی Docker — پنل ما با xray-core.</p>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setMethod('railway')}
+                  onClick={() => chooseMethod('railway')}
                   className={`p-4 rounded-xl border text-right transition-all ${
                     method === 'railway' ? 'border-purple-500 bg-purple-500/10' : 'border-slate-700 bg-slate-900/40 hover:border-slate-600'
                   }`}
                 >
                   <TrainFront className={`w-5 h-5 mb-2 ${method === 'railway' ? 'text-purple-400' : 'text-slate-500'}`} />
                   <p className="text-sm font-bold text-white">Railway</p>
-                  <p className="text-xs text-slate-400 mt-1">استقرار خودکار. StanNG.</p>
+                  <p className="text-xs text-slate-400 mt-1">استقرار خودکار پنل.</p>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setMethod('render')}
+                  onClick={() => chooseMethod('render')}
                   className={`p-4 rounded-xl border text-right transition-all ${
                     method === 'render' ? 'border-teal-500 bg-teal-500/10' : 'border-slate-700 bg-slate-900/40 hover:border-slate-600'
                   }`}
                 >
                   <Cloud className={`w-5 h-5 mb-2 ${method === 'render' ? 'text-teal-400' : 'text-slate-500'}`} />
                   <p className="text-sm font-bold text-white">Render.com</p>
-                  <p className="text-xs text-slate-400 mt-1">استقرار خودکار. StanNG.</p>
+                  <p className="text-xs text-slate-400 mt-1">استقرار خودکار پنل.</p>
                 </button>
               </div>
             </div>
@@ -861,7 +877,7 @@ export default function DeployWizard() {
                     <p className="text-sm font-bold text-white flex items-center gap-2">
                       <TrainFront className="w-4 h-4 text-purple-400" /> خودکار با توکن (پیشنهادی)
                     </p>
-                    <p className="text-xs text-slate-400 mt-1">پروژه ساخته می‌شود، مخزن stanngv2 متصل و دیپلوی شروع می‌شود — همه از همین‌جا.</p>
+                    <p className="text-xs text-slate-400 mt-1">پروژه ساخته می‌شود، مخزن پنل متصل و دیپلوی شروع می‌شود — همه از همین‌جا.</p>
                   </button>
                   <button
                     type="button"
@@ -878,11 +894,30 @@ export default function DeployWizard() {
             )}
 
             <div>
-              <label className="block text-sm text-slate-300 mb-2 font-medium">منبع ورکر</label>
+              <label className="block text-sm text-slate-300 mb-2 font-medium">
+                {method === 'vps' || method === 'railway' || method === 'render' ? 'پنل' : 'منبع ورکر'}
+              </label>
               {method === 'vps' || method === 'railway' || method === 'render' ? (
+                PANELS.length === 1 ? (
+                  <div className="p-3 rounded-xl border border-brand-500/40 bg-brand-500/5">
+                    <p className="text-sm font-bold text-white flex items-center gap-2">
+                      <Rocket className="w-4 h-4 text-brand-400" />
+                      {PANEL.name}
+                    </p>
+                    <p className="text-xs text-slate-400 mt-1">{PANEL.tagline}</p>
+                    <p className="text-xs text-slate-500 mt-1" dir="ltr">
+                      {PANEL.repo} · {method === 'render' ? 'Render.com' : method === 'railway' ? 'Railway' : 'Docker + VPS'}
+                    </p>
+                  </div>
+                ) : (
                 <select value={workerSource} onChange={(e) => setWorkerSource(e.target.value)} className="input-field">
-                  <option value="stanngv2">StanNG v2 — پنل VLESS با xray-core ({method === 'render' ? 'Render.com' : method === 'railway' ? 'Railway' : 'Docker + VPS'})</option>
+                  {PANELS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} — {p.tagline} ({method === 'render' ? 'Render.com' : method === 'railway' ? 'Railway' : 'Docker + VPS'})
+                    </option>
+                  ))}
                 </select>
+                )
               ) : (
                 <select value={workerSource} onChange={(e) => setWorkerSource(e.target.value)} className="input-field">
                   <option value="edgetunnel">cmliu/edgetunnel — ورکر کامل (VLESS/Trojan/SS + پنل)</option>
@@ -900,10 +935,10 @@ export default function DeployWizard() {
                   : workerSource === 'miliconfigzeus'
                   ? <>پنل کامل miliconfigzeus با دیتابیس اختصاصی D1 مستقر می‌شود (خودکار ساخته می‌شود). مدیریت کاربران، سهمیه‌ها و اسکنر داخل خود پنل مستقر است؛ آدرس پنل، ریشه همان ورکر خواهد بود. این سورس همیشه به‌صورت Workers مستقر می‌شود.</>
                   : method === 'render'
-                  ? <>StanNG v2 با کلید API رندر روی Render.com مستقر می‌شود — سرویس Docker (xray-core + پنل VLESS) از همان Dockerfile رسمی بیلد می‌شود. بعد از موفقیت، از <code className="text-brand-300">/login</code> وارد پنل StanNG شوید و اولین کاربر ادمین را همان‌جا بسازید.</>
+                  ? <>{PANEL.name} با کلید API رندر روی Render.com مستقر می‌شود — سرویس Docker (xray-core + پنل) از همان Dockerfile رسمی بیلد می‌شود. بعد از موفقیت، از <code className="text-brand-300">{PANEL.panelPath}</code> وارد پنل شوید (رمز ادمین موقع استقرار ساخته و همین‌جا نمایش داده می‌شود).</>
                   : method === 'railway'
                   ? railMode === 'auto'
-                    ? <>StanNG v2 با توکن Railway روی سرورهای Railway مستقر می‌شود — Docker بیلد شده و xray-core + پنل VLESS بالا می‌آید. بعد از موفقیت، از <code className="text-brand-300">/login</code> وارد پنل StanNG شوید و اولین کاربر ادمین را همان‌جا بسازید.</>
+                    ? <>{PANEL.name} با توکن Railway روی سرورهای Railway مستقر می‌شود — Docker بیلد شده و xray-core + پنل بالا می‌آید. بعد از موفقیت، از <code className="text-brand-300">{PANEL.panelPath}</code> وارد پنل شوید (رمز ادمین موقع استقرار ساخته و همین‌جا نمایش داده می‌شود).</>
                     : <>فایل‌های Docker استاندارد تولید و دانلود می‌شوند — برای استقرار دستی در Railway یا هر سرویس Docker.</>
                   : <>ورکر از مخزن رسمی <a href="https://github.com/cmliu/edgetunnel" target="_blank" rel="noopener noreferrer" className="text-brand-400 hover:underline">cmliu/edgetunnel</a> بارگذاری می‌شود. پنل داخلی ورکر حذف شده و همه تنظیمات از این برنامه مدیریت می‌شود.</>
                 }
@@ -991,7 +1026,7 @@ export default function DeployWizard() {
                   <p className="text-xs text-slate-500 mb-1">مسیر پنل</p>
                   <p className="text-white font-medium" dir="ltr">
                     {method === 'railway' && railMode === 'auto' || method === 'render'
-                      ? '/login (پنل StanNG)'
+                      ? `${PANEL.panelPath} (${PANEL.name})`
                       : workerSource === 'nexus' ? `/${uuid || '…'}` : `/${customPath || 'admin'}`}
                   </p>
                 </div>
@@ -1035,7 +1070,7 @@ export default function DeployWizard() {
                 )}
 
                 {deploying && (
-                  <p className="text-sm text-slate-400 animate-pulse">{method === 'railway' && railMode === 'auto' ? 'Railway در حال بیلد Docker و استقرار StanNG است — این صفحه خودکار به‌روزرسانی می‌شود.' : method === 'render' ? 'Render در حال بیلد Docker و استقرار StanNG است — این صفحه خودکار به‌روزرسانی می‌شود.' : 'ورکر از مخزن دانلود، KV ساخته و روی edge مستقر می‌شود...'}</p>
+                  <p className="text-sm text-slate-400 animate-pulse">{method === 'railway' && railMode === 'auto' ? `Railway در حال بیلد Docker و استقرار ${PANEL.name} است — این صفحه خودکار به‌روزرسانی می‌شود.` : method === 'render' ? `Render در حال بیلد Docker و استقرار ${PANEL.name} است — این صفحه خودکار به‌روزرسانی می‌شود.` : 'ورکر از مخزن دانلود، KV ساخته و روی edge مستقر می‌شود...'}</p>
                 )}
               </div>
             )}
@@ -1066,7 +1101,7 @@ export default function DeployWizard() {
                         )}
                         {method === 'railway' && railAdminRef.current && (
                           <div className="p-4 rounded-xl bg-slate-900/50 border border-brand-500/40">
-                            <p className="text-xs text-slate-500 mb-2">حساب ادمین پنل StanNG — فقط همین‌جا نمایش داده می‌شود</p>
+                            <p className="text-xs text-slate-500 mb-2">حساب ادمین {PANEL.name} — فقط همین‌جا نمایش داده می‌شود</p>
                             <p className="text-slate-300 text-sm font-mono" dir="ltr">username: {railAdminRef.current.user}</p>
                             <p className="text-slate-300 text-sm font-mono break-all" dir="ltr">password: {railAdminRef.current.pass}</p>
                           </div>
@@ -1125,7 +1160,7 @@ export default function DeployWizard() {
                         ) : (
                           <ol className="text-xs text-slate-300 space-y-1 list-decimal list-inside">
                             <li>فایل ZIP را به VPS آپلود کنید</li>
-                            <li>استخراج کنید: <code className="text-brand-300">unzip {name}-stanng.zip</code></li>
+                            <li>استخراج کنید: <code className="text-brand-300">unzip {name}-{PANEL.id}.zip</code></li>
                             <li>اجرا کنید: <code className="text-brand-300">bash deploy.sh</code></li>
                             <li>پنل: <code className="text-brand-300">http://آیپی‌سرور:8080/login</code></li>
                           </ol>
@@ -1249,7 +1284,7 @@ function RenderTokenPanel({ tokens, selectedId, onSelect, newName, newToken, onN
           type="text"
           value={newName}
           onChange={(e) => onNewName(e.target.value)}
-          placeholder="نام کلید (مثلاً stanng-main)"
+          placeholder={`نام کلید (مثلاً ${PANEL.id}-main)`}
           className="input-field text-sm"
         />
         <textarea

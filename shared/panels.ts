@@ -1,19 +1,23 @@
 /**
- * Deployable panel catalog — the single source of truth for every panel the
- * app can install on Railway, Render.com and a Docker VPS.
+ * Deployable panel catalog — the single source of truth for the panel the app
+ * installs on Railway, Render.com and a Docker VPS.
  *
- * Both the Worker (worker/railway.ts, worker/render.ts, worker/index.ts) and the
- * frontend (DeployWizard, vps-deploy.ts) import this module, so adding a panel
- * here makes it available in every part of the app at once — exactly like the
- * Cloudflare worker sources work.
+ * Both the Worker (worker/railway.ts, worker/render.ts, worker/panel-deploy.ts,
+ * worker/telegram-ui.ts) and the frontend (DeployWizard, vps-deploy.ts) import
+ * this module, so the list below is exactly what every part of the app offers —
+ * the Telegram deployer, the web wizard and the generated ZIP packages can never
+ * disagree about what "the panel" is.
+ *
+ * The catalog now holds **one** entry: our own panel (NEXUS / Mizetusi). Third-
+ * party panels were removed on the owner's request — see REMOVED_PANELS for what
+ * was dropped and why, so the decision stays auditable. The Cloudflare *worker*
+ * sources are a separate catalog (shared/worker-sources.ts) and are unaffected.
  *
  * Only public, non-secret metadata lives here. Credentials (admin password,
  * secret key) are always generated at deploy time and never stored in this file.
  *
  * LIVENESS RULE: every entry carries `lastCommit` + `verifiedAt` — the date of
  * the newest upstream commit and the date we checked it against the live repo.
- * A panel is only listed when its repository was alive and current at
- * verification time (see the `excluded` list at the bottom for what we dropped).
  */
 
 export type PanelRuntime = 'docker' | 'python'
@@ -118,206 +122,65 @@ export const PANEL_ORIGIN: Record<PanelOrigin, { flag: string; label: string }> 
 
 export const PANELS: PanelSpec[] = [
   {
-    id: 'stanngv2',
-    name: 'StanNG v2',
-    tagline: 'پنل VLESS با xray-core — مستقر با Dockerfile رسمی مخزن',
-    repo: 'youdidking/stanngv2',
-    url: 'https://github.com/youdidking/stanngv2',
+    id: 'mizetusi',
+    name: 'پنل اختصاصی ما',
+    tagline:
+      'NEXUS (Mizetusi) — کنترل‌سنتر FastAPI + Xray با ماتریس کامل ترانسپورت (VLESS/VMess/Trojan/Shadowsocks/Reality) و پل ورکر کلودفلر',
+    repo: 'miladjahani/Mizetusi',
+    url: 'https://github.com/miladjahani/Mizetusi',
     runtime: 'docker',
-    port: 8000,
+    port: 8080,
+    // 8443 carries the raw-TCP Reality inbound; it is only publishable on a host
+    // with a real TCP port (VPS), so Railway/Render simply skip it.
+    extraPorts: [8443],
     hasDockerfile: true,
     dockerfilePath: 'Dockerfile',
     panelPath: '/login',
-    healthPath: '/login',
-    env: { adminPassword: 'ADMIN_PASSWORD', secretKey: 'SECRET_KEY', port: 'PORT' },
-    setupPath: '/api/setup',
-    targets: ['railway', 'render', 'vps'],
-    needsXray: true,
-    origin: 'intl',
-    notes: 'پایتون + Dockerfile مخزن؛ سبک‌ترین گزینه برای Railway و Render.',
-  },
-  {
-    id: 'pxpanel',
-    name: 'PXPANEL',
-    tagline: 'دروازه VLESS / XHTTP / Hysteria2 / TUIC + داشبورد و ربات تلگرام',
-    repo: 'iran-px-panel/pxpanel',
-    url: 'https://github.com/iran-px-panel/pxpanel',
-    runtime: 'python',
-    port: 8000,
-    buildCommand: 'pip install -r requirements.txt',
-    startCommand: 'python main.py',
-    panelPath: '/dashboard',
-    healthPath: '/dashboard',
+    healthPath: '/health',
     env: {
       adminPassword: 'ADMIN_PASSWORD',
-      secretKey: 'SECRET_KEY',
+      secretKey: 'JWT_SECRET',
       port: 'PORT',
-      dataDir: 'DATA_DIR',
-      publicDomain: 'RAILWAY_PUBLIC_DOMAIN',
+      dataDir: 'SQLITE_PATH',
+      publicDomain: 'PUBLIC_BASE_URL',
     },
     targets: ['railway', 'render', 'vps'],
+    // The image builds xray-core from the official xtls image itself, so nothing
+    // has to be installed on the host.
     needsXray: false,
-    defaultAdminPassword: 'pxpanel2026',
+    // No `defaultAdminPassword` on purpose: the deployer then generates a strong
+    // password per deployment and shows it once, instead of shipping the panel's
+    // own `admin/admin` default. The upstream default is documented in `notes`.
     origin: 'ir',
-    notes: 'پایتون محض — بدون نیاز به دسترسی root؛ مناسب ریلوی/رندر.',
-  },
-
-  // ── Verified community panels (VPS / Docker) ──────────────────────────────
-  // Listed only after checking the live repo: these three were active on the
-  // day of verification (last commit within 24h) and ship a Docker image.
-  {
-    id: '3xui',
-    name: '3X-UI',
-    tagline: 'پنل چند‌پروتکلی Xray (VLESS/Vmess/Trojan/Hysteria2/AmneziaWG) — فورک پیشرفتهٔ x-ui',
-    repo: 'MHSanaei/3x-ui',
-    url: 'https://github.com/MHSanaei/3x-ui',
-    runtime: 'docker',
-    port: 2053,
-    extraPorts: [443, 8443],
-    hasDockerfile: true,
-    dockerImage: 'ghcr.io/mhsanaei/3x-ui:latest',
-    dockerfilePath: 'Dockerfile',
-    panelPath: '/',
-    healthPath: '/',
-    // Image reads XUI_* envs; panel port/paths are configured inside the UI, so
-    // we deliberately do not invent env names beyond the published ones.
-    env: {},
-    targets: ['vps'],
-    needsXray: false,
-    defaultAdminPassword: 'admin',
-    origin: 'ir',
-    dataVolume: '/etc/x-ui',
-    capAdd: ['NET_ADMIN', 'NET_RAW'],
+    dataVolume: '/data',
+    capAdd: ['NET_ADMIN'],
     notes:
-      'ورود پیش‌فرض admin/admin است — بعد از اولین ورود، رمز و پورت پنل را در تنظیمات عوض کنید. نیازمند NET_ADMIN برای Fail2ban است (در compose تنظیم شده).',
-    lastCommit: '2026-09-12',
-    verifiedAt: '2026-09-12',
-  },
-  {
-    id: 'sui',
-    name: 'S-UI',
-    tagline: 'پنل تک‌فایلی بر پایهٔ Sing-Box — چند‌پروتکلی + ساب‌سکریپشن سه‌فرمتی',
-    repo: 'alireza0/s-ui',
-    url: 'https://github.com/alireza0/s-ui',
-    runtime: 'docker',
-    port: 2095,
-    extraPorts: [2096],
-    dockerImage: 'alireza7/s-ui:latest',
-    panelPath: '/app/',
-    healthPath: '/app/',
-    env: {},
-    targets: ['vps'],
-    needsXray: false,
-    defaultAdminPassword: 'admin',
-    origin: 'ir',
-    dataVolume: '/app/db',
-    tty: true,
-    notes:
-      'پنل روی پورت 2095 و مسیر /app/ بالا می‌آید و سرویس ساب‌سکریپشن روی 2096. ورود پیش‌فرض admin/admin.',
-    lastCommit: '2026-09-12',
-    verifiedAt: '2026-09-12',
-  },
-  {
-    id: 'pasarguard',
-    name: 'PasarGuard',
-    tagline: 'جانشین Marzban — مدیریت انبوه کاربر پروکسی (Xray + WireGuard)',
-    repo: 'PasarGuard/panel',
-    url: 'https://github.com/PasarGuard/panel',
-    runtime: 'docker',
-    port: 8000,
-    dockerImage: 'pasarguard/panel:latest',
-    panelPath: '/',
-    healthPath: '/',
-    env: { dbUrl: 'SQLALCHEMY_DATABASE_URL' },
-    requiresDb: 'postgres',
-    targets: ['vps'],
-    needsXray: false,
-    origin: 'ir',
-    dataVolume: '/var/lib/pasarguard',
-    notes:
-      'به PostgreSQL نیاز دارد (compose خودش می‌سازد). پورت پیش‌فرض ۸۰۰۰ است؛ اگر پنل روی پورت دیگری گوش می‌دهد، مقدار را در .env و ports اصلاح کنید.',
-    lastCommit: '2026-09-12',
-    verifiedAt: '2026-09-12',
-  },
-  // Lesser-known but actively maintained (checked live): a FastAPI proxy panel
-  // that is designed to run free on Render/Railway, and a WireGuard panel.
-  {
-    id: 'luffy',
-    name: 'Luffy Panel',
-    tagline: 'پنل سبک VLESS + Trojan با FastAPI — ساخته‌شده برای Render و Railway',
-    repo: 'luffy-sh-op/LUFFY_PANEL',
-    url: 'https://github.com/luffy-sh-op/LUFFY_PANEL',
-    runtime: 'python',
-    port: 8000,
-    buildCommand: 'pip install -r requirements.txt',
-    startCommand: 'uvicorn main:app --host 0.0.0.0 --port $PORT',
-    panelPath: '/',
-    healthPath: '/',
-    env: { port: 'PORT' },
-    targets: ['railway', 'render', 'vps'],
-    needsXray: false,
-    origin: 'intl',
-    notes:
-      'مخزن رسمی خودش Procfile برای Render/Railway دارد؛ دیتابیس SQLite داخلی و ربات تلگرام اختیاری. روی پلن رایگان Render/Railway قابل اجراست.',
-    lastCommit: '2026-07-18',
-    verifiedAt: '2026-09-12',
-  },
-  {
-    id: 'wgeasy',
-    name: 'WG-Easy',
-    tagline: 'پنل WireGuard (و AmneziaWG) با رابط وب، QR و مدیریت کلاینت‌ها',
-    repo: 'wg-easy/wg-easy',
-    url: 'https://github.com/wg-easy/wg-easy',
-    runtime: 'docker',
-    port: 51821,
-    udpPorts: [51820],
-    dockerImage: 'ghcr.io/wg-easy/wg-easy:15',
-    panelPath: '/',
-    healthPath: '/',
-    env: { port: 'PORT', adminPassword: 'PASSWORD', publicDomain: 'WG_HOST' },
-    targets: ['vps'],
-    needsXray: false,
-    origin: 'intl',
-    dataVolume: '/etc/wireguard',
-    capAdd: ['NET_ADMIN', 'SYS_MODULE'],
-    extraVolumes: ['/lib/modules:/lib/modules:ro'],
-    sysctls: ['net.ipv4.ip_forward=1', 'net.ipv4.conf.all.src_valid_mark=1'],
-    notes:
-      'به NET_ADMIN و mount ماژول‌های کرنل نیاز دارد (هر دو در compose تنظیم شده‌اند). رمز ورود پنل را در .env (PASSWORD) عوض کنید و WG_HOST را روی IP سرور بگذارید.',
-    lastCommit: '2026-09-09',
-    verifiedAt: '2026-09-12',
-  },
-  {
-    id: 'remnawave',
-    name: 'Remnawave',
-    tagline: 'پنل نسل‌جدید روسی (Node.js) — چند‌نودی، اشتراک و مدیریت کاربران',
-    repo: 'remnawave/backend',
-    url: 'https://github.com/remnawave/backend',
-    runtime: 'docker',
-    port: 3000,
-    dockerImage: 'remnawave/backend:latest',
-    panelPath: '/',
-    healthPath: '/',
-    env: {
-      port: 'APP_PORT',
-      dbUrl: 'DATABASE_URL',
-      redisHost: 'REDIS_HOST',
-      redisUrl: 'REDIS_URL',
-    },
-    requiresDb: 'postgres',
-    requiresRedis: true,
-    targets: ['vps'],
-    needsXray: false,
-    origin: 'ru',
-    dataVolume: '/var/lib/remnawave',
-    notes:
-      'به PostgreSQL و Redis نیاز دارد (هر دو در compose ساخته می‌شوند). نسخهٔ backend؛ رابط کاربری در نسخه‌های جدید روی همین سرویس سرو می‌شود.',
-    lastCommit: '2026-09-12',
-    verifiedAt: '2026-09-12',
+      'رمز ادمین هنگام استقرار ساخته و یک‌بار نمایش داده می‌شود (پیش‌فرض خودِ پنل admin/admin است — همان اول عوضش کنید). دیتابیس SQLite در /data است، پس روی Railway/Render یک Volume روی /data بگذارید وگرنه با هر ری‌دیپلوی پاک می‌شود. Reality فقط وقتی منتشر می‌شود که هاست یک پورت TCP واقعی داشته باشد (VPS: 8443، یا TCP Proxy ریلوی). CAP NET_ADMIN فقط برای خروج اختیاری WARP در compose تنظیم شده است.',
+    lastCommit: '2026-09-21',
+    verifiedAt: '2026-09-21',
   },
 ]
 
 export const DEFAULT_PANEL_ID = PANELS[0].id
+
+/**
+ * Panels that were in this catalog and were **removed on the owner's request**:
+ * the app now ships a single, first-party panel. They are recorded here (instead
+ * of being silently deleted) so the removal is auditable and reversible, and so
+ * nobody later re-adds one believing it was never considered.
+ *
+ * The Cloudflare worker sources (shared/worker-sources.ts) are unaffected.
+ */
+export const REMOVED_PANELS: Array<{ id: string; name: string; repo: string; reason: string }> = [
+  { id: 'stanngv2', name: 'StanNG v2', repo: 'youdidking/stanngv2', reason: 'پنل شخص ثالث — به درخواست مالک حذف شد' },
+  { id: 'pxpanel', name: 'PXPANEL', repo: 'iran-px-panel/pxpanel', reason: 'پنل شخص ثالث — به درخواست مالک حذف شد' },
+  { id: '3xui', name: '3X-UI', repo: 'MHSanaei/3x-ui', reason: 'پنل شخص ثالث — به درخواست مالک حذف شد' },
+  { id: 'sui', name: 'S-UI', repo: 'alireza0/s-ui', reason: 'پنل شخص ثالث — به درخواست مالک حذف شد' },
+  { id: 'pasarguard', name: 'PasarGuard', repo: 'PasarGuard/panel', reason: 'پنل شخص ثالث — به درخواست مالک حذف شد' },
+  { id: 'luffy', name: 'Luffy Panel', repo: 'luffy-sh-op/LUFFY_PANEL', reason: 'پنل شخص ثالث — به درخواست مالک حذف شد' },
+  { id: 'wgeasy', name: 'WG-Easy', repo: 'wg-easy/wg-easy', reason: 'پنل شخص ثالث — به درخواست مالک حذف شد' },
+  { id: 'remnawave', name: 'Remnawave', repo: 'remnawave/backend', reason: 'پنل شخص ثالث — به درخواست مالک حذف شد' },
+]
 
 /**
  * Repositories we checked and deliberately did NOT add — kept here so the
@@ -335,7 +198,7 @@ export const EXCLUDED_REPOS: Array<{ repo: string; reason: string }> = [
   // cannot check liveness or wire them into the automated deployer.
   { repo: 'SLV panel', reason: 'مخزن عمومی قابل‌تأییدی ندارد (از طریق تلگرام/نمایندگی توزیع می‌شود)' },
   { repo: 'RVG panel', reason: 'مخزن عمومی ندارد؛ فقط به‌عنوان سبک کانفیگ (RVG style) در چند پروژه ارجاع داده شده' },
-  { repo: 'loofi panel', reason: 'در گیت‌هاب فقط پروژه‌های همنام و بی‌ربط پیدا شد (no verifiable repo)' },
+  { repo: 'loofi panel', reason: 'در گیت‌هاب فقط پروژه‌های هم‌نام و بی‌ربط پیدا شد (no verifiable repo)' },
   { repo: 'sanayii panel', reason: 'مخزن عمومی ندارد؛ در گفتگوی 3x-ui به‌عنوان پنل تجاری فارسی نام برده شده' },
   { repo: 'solgx', reason: 'هیچ مخزن مرتبطی در گیت‌هاب پیدا نشد (0 نتیجه)' },
   { repo: 'freedomnet25500/new-worker-panel', reason: 'آخرین کامیت ۲۰۲۴-۰۶-۰۱ — راکد' },
