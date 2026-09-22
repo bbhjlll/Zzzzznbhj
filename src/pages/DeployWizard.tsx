@@ -603,6 +603,11 @@ export default function DeployWizard() {
     )
   }
 
+  // Panel methods deploy the catalog panel (our own NEXUS/Mizetusi) rather than
+  // a Cloudflare worker source, so every label and summary card below branches
+  // on this — the panel path must never show worker-only wording.
+  const panelMethod = method === 'vps' || method === 'railway' || method === 'render'
+
   const steps = [
     { num: 1, label: 'نام و کلید', icon: Terminal },
     { num: 2, label: 'تنظیمات', icon: Settings },
@@ -612,7 +617,7 @@ export default function DeployWizard() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-white">استقرار ورکر جدید</h1>        <p className="text-slate-400 text-sm mt-1">{method === 'render' ? 'استقرار خودکار پنل روی Render.com — سرویس Docker از مخزن ساخته و مستقر می‌شود' : method === 'railway' && railMode === 'auto' ? 'استقرار خودکار پنل روی Railway — پروژه ساخته، مخزن متصل و دیپلوی اجرا می‌شود' : method === 'railway' ? 'فایل‌های Railway (Dockerfile + railway.toml) برای استقرار پنل تولید و دانلود می‌شوند' : method === 'vps' ? 'فایل‌های Docker برای استقرار پنل روی VPS تولید و دانلود می‌شوند' : 'ورکر به‌صورت خودکار از مخزن دانلود و روی کلودفلر مستقر می‌شود — نیازی به کدنویسی نیست'}</p>
+        <h1 className="text-2xl font-bold text-white">{panelMethod ? 'استقرار پنل اختصاصی' : 'استقرار ورکر جدید'}</h1>        <p className="text-slate-400 text-sm mt-1">{method === 'render' ? 'استقرار خودکار پنل روی Render.com — سرویس Docker از مخزن ساخته و مستقر می‌شود' : method === 'railway' && railMode === 'auto' ? 'استقرار خودکار پنل روی Railway — پروژه ساخته، مخزن متصل و دیپلوی اجرا می‌شود' : method === 'railway' ? 'فایل‌های Railway (Dockerfile + railway.toml) برای استقرار پنل تولید و دانلود می‌شوند' : method === 'vps' ? 'فایل‌های Docker برای استقرار پنل روی VPS تولید و دانلود می‌شوند' : 'ورکر به‌صورت خودکار از مخزن دانلود و روی کلودفلر مستقر می‌شود — نیازی به کدنویسی نیست'}</p>
         </div>
 
         {/* Info banner */}
@@ -657,7 +662,7 @@ export default function DeployWizard() {
         {step === 1 && (
           <div className="space-y-6 animate-fade-in">
             <div>
-              <label className="block text-sm text-slate-300 mb-2 font-medium">نام ورکر</label>
+              <label className="block text-sm text-slate-300 mb-2 font-medium">{panelMethod ? 'نام پروژه' : 'نام ورکر'}</label>
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -691,7 +696,7 @@ export default function DeployWizard() {
                   <RefreshCw className="w-4 h-4" />
                 </button>
               </div>
-              <p className="text-xs text-slate-500 mt-2">این کلید خصوصی پنل شماست — هر کس آن را داشته باشد می‌تواند ورکر را مدیریت کند</p>
+              <p className="text-xs text-slate-500 mt-2">این کلید خصوصی پنل شماست — هر کس آن را داشته باشد می‌تواند {panelMethod ? 'پنل' : 'ورکر'} را مدیریت کند</p>
             </div>
 
             <div>
@@ -928,7 +933,9 @@ export default function DeployWizard() {
                 </select>
               )}
               <p className="text-xs text-slate-500 mt-2">
-                {workerSource === 'custom'
+                {method === 'vps'
+                  ? <>پنل اختصاصی <b>{PANEL.name}</b> روی سرور اختصاصی شما با Docker بالا می‌آید — فایل‌های <code className="text-brand-300">docker-compose.yml</code>، <code className="text-brand-300">nginx.conf</code>، <code className="text-brand-300">.env</code> و <code className="text-brand-300">deploy.sh</code> تولید و دانلود می‌شوند؛ بعد از اجرا از <code className="text-brand-300">{PANEL.panelPath}</code> وارد پنل شوید (رمز ادمین هنگام استقرار ساخته می‌شود).</>
+                  : workerSource === 'custom'
                   ? <>ورکر سفارشی ما با پنل داخلی کامل، اسکنر IP داخلی، و آپدیت خودکار. KV binding با نام <code className="text-brand-300">C</code> و کلید پیکربندی <code className="text-brand-300">c</code>.</>
                   : workerSource === 'nexus'
                   ? <>NEXUS — نسل جدید ورکر با پنل داخلی تنظیمات هوشمند، نقشهٔ زندهٔ سراسری، مبهم‌سازی پیشرفته و ساب‌نویس خودکار. پنل با همان UUID در مسیر <code className="text-brand-300">/{uuid}</code> باز می‌شود و تنظیمات در KV (<code className="text-brand-300">C</code> / <code className="text-brand-300">c</code>) ذخیره می‌شود.</>
@@ -991,7 +998,7 @@ export default function DeployWizard() {
               <h3 className="text-sm font-bold text-slate-300 mb-3">خلاصه استقرار</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
-                  <p className="text-xs text-slate-500 mb-1">نام ورکر</p>
+                  <p className="text-xs text-slate-500 mb-1">{panelMethod ? 'نام پروژه' : 'نام ورکر'}</p>
                   <p className="text-white font-medium" dir="ltr">{name}</p>
                 </div>
                 <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
@@ -999,19 +1006,22 @@ export default function DeployWizard() {
                   <p className="text-white font-medium">{method === 'workers' ? 'CF Workers' : method === 'pages' ? 'CF Pages' : method === 'railway' ? 'Railway' : method === 'render' ? 'Render.com' : 'VPS (Docker)'}</p>
                 </div>
                 <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
-                  <p className="text-xs text-slate-500 mb-1">منبع ورکر</p>
-                  <p className="text-white font-medium" dir="ltr">{workerSource === 'custom' ? 'ورکر سفارشی ما' : workerSource === 'nexus' ? 'NEXUS — نسل جدید' : workerSource === 'miliconfigzeus' ? 'miliconfig zeus' : workerSource === 'edgetunnel' ? 'cmliu/edgetunnel' : 'cmliu/edgetunnel (KV)'}</p>
+                  <p className="text-xs text-slate-500 mb-1">{panelMethod ? 'پنل' : 'منبع ورکر'}</p>
+                  <p className="text-white font-medium" dir={panelMethod ? undefined : 'ltr'}>{panelMethod ? PANEL.name : workerSource === 'custom' ? 'ورکر سفارشی ما' : workerSource === 'nexus' ? 'NEXUS — نسل جدید' : workerSource === 'miliconfigzeus' ? 'miliconfig zeus' : workerSource === 'edgetunnel' ? 'cmliu/edgetunnel' : 'cmliu/edgetunnel (KV)'}</p>
                 </div>
+                {!panelMethod && (
                 <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
                   <p className="text-xs text-slate-500 mb-1">Proxy IP</p>
                   <p className="text-white font-medium" dir="ltr">{proxyIP || 'auto'}</p>
                 </div>
-                {adminPassword && workerSource !== 'custom' && workerSource !== 'nexus' && (
+                )}
+                {!panelMethod && adminPassword && workerSource !== 'custom' && workerSource !== 'nexus' && (
                   <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
                     <p className="text-xs text-slate-500 mb-1">رمز ادمین</p>
                     <p className="text-white font-medium" dir="ltr">{'•'.repeat(Math.min(adminPassword.length, 20))}</p>
                   </div>
                 )}
+                {method !== 'vps' && !(method === 'railway' && railMode === 'zip') && (
                 <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
                   <p className="text-xs text-slate-500 mb-1">{method === 'railway' && railMode === 'auto' ? 'توکن Railway' : method === 'render' ? 'کلید API رندر' : 'توکن کلودفلر'}</p>
                   <p className="text-white font-medium">
@@ -1022,10 +1032,11 @@ export default function DeployWizard() {
                       : (tokens.find(t => t.id === selectedToken)?.name ?? '—')}
                   </p>
                 </div>
+                )}
                 <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
                   <p className="text-xs text-slate-500 mb-1">مسیر پنل</p>
                   <p className="text-white font-medium" dir="ltr">
-                    {method === 'railway' && railMode === 'auto' || method === 'render'
+                    {panelMethod
                       ? `${PANEL.panelPath} (${PANEL.name})`
                       : workerSource === 'nexus' ? `/${uuid || '…'}` : `/${customPath || 'admin'}`}
                   </p>
@@ -1088,14 +1099,14 @@ export default function DeployWizard() {
                     {deployResult.panelUrl && (
                       <div className="mt-6 space-y-3 max-w-md mx-auto">
                         <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
-                          <p className="text-xs text-slate-500 mb-2">لینک خصوصی پنل ورکر</p>
+                          <p className="text-xs text-slate-500 mb-2">{panelMethod ? 'لینک پنل' : 'لینک خصوصی پنل ورکر'}</p>
                           <a href={deployResult.panelUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-brand-300 hover:text-brand-200 transition-colors break-all text-sm" dir="ltr">
                             <ExternalLink className="w-4 h-4 shrink-0" /> {deployResult.panelUrl}
                           </a>
                         </div>
                         {deployResult.url && (
                           <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
-                            <p className="text-xs text-slate-500 mb-2">آدرس پایه ورکر</p>
+                            <p className="text-xs text-slate-500 mb-2">{panelMethod ? 'آدرس پایه پنل' : 'آدرس پایه ورکر'}</p>
                             <p className="text-slate-300 text-sm break-all" dir="ltr">{deployResult.url}</p>
                           </div>
                         )}
@@ -1106,7 +1117,7 @@ export default function DeployWizard() {
                             <p className="text-slate-300 text-sm font-mono break-all" dir="ltr">password: {railAdminRef.current.pass}</p>
                           </div>
                         )}
-                        <p className="text-xs text-warning-400/80 px-4">لینک پنل را خصوصی نگه دارید — هر کس آن را داشته باشد می‌تواند ورکر را مدیریت کند.</p>
+                        <p className="text-xs text-warning-400/80 px-4">لینک پنل را خصوصی نگه دارید — هر کس آن را داشته باشد می‌تواند {panelMethod ? 'پنل' : 'ورکر'} را مدیریت کند.</p>
                       </div>
                     )}
 
@@ -1122,7 +1133,7 @@ export default function DeployWizard() {
                         </a>
                       )}
                       {!(method === 'railway' && railMode === 'auto') && method !== 'render' && (
-                        <button onClick={() => navigate('/deployments')} className="btn-primary">مشاهده ورکرها</button>
+                        <button onClick={() => navigate(panelMethod ? '/deployments?tab=panels' : '/deployments')} className="btn-primary">{panelMethod ? 'مشاهده پنل‌ها' : 'مشاهده ورکرها'}</button>
                       )}
                       <button onClick={() => { setStep(1); setDeployResult(null); setRailProjectUrl(null); setRenderProjectUrl(null); setName(genName()); setUuid(genUuid()); setCustomPath(''); setProxyIP(''); setAdminPassword(''); setDeployLogs([]); railAdminRef.current = null; }} className="btn-ghost">استقرار جدید</button>
                     </div>
