@@ -74,6 +74,13 @@ export interface PanelSpec {
   requiresRedis?: boolean
   /** Container path that must persist between restarts. */
   dataVolume?: string
+  /**
+   * State file the panel expects *inside* that path (SQLite database). Panels
+   * read this from an env var, and handing them the directory itself makes
+   * sqlite3 fail with "unable to open database file" — so the file is declared
+   * here rather than re-derived at every deploy path.
+   */
+  dataFile?: string
   /** Linux capabilities the container needs (e.g. NET_ADMIN for Fail2ban). */
   capAdd?: string[]
   /** Extra read-only host mounts (e.g. /lib/modules for WireGuard). */
@@ -153,6 +160,9 @@ export const PANELS: PanelSpec[] = [
     // own `admin/admin` default. The upstream default is documented in `notes`.
     origin: 'ir',
     dataVolume: '/data',
+    // Exactly what the panel's own docker-compose.yml / render.yaml set, and
+    // what app/db.py falls back to when the variable is absent.
+    dataFile: '/data/nexus.db',
     capAdd: ['NET_ADMIN'],
     notes:
       'رمز ادمین هنگام استقرار ساخته و یک‌بار نمایش داده می‌شود (پیش‌فرض خودِ پنل admin/admin است — همان اول عوضش کنید). دیتابیس SQLite در /data است، پس روی Railway/Render یک Volume روی /data بگذارید وگرنه با هر ری‌دیپلوی پاک می‌شود. Reality فقط وقتی منتشر می‌شود که هاست یک پورت TCP واقعی داشته باشد (VPS: 8443، یا TCP Proxy ریلوی). CAP NET_ADMIN فقط برای خروج اختیاری WARP در compose تنظیم شده است.',
@@ -227,6 +237,19 @@ export function panelOriginLabel(panel: PanelSpec): string {
 }
 
 /** Full clone URL used inside generated Dockerfiles / deploy scripts. */
+/** Container directory a panel's state lives in (never the file itself). */
+export function panelDataDir(panel: PanelSpec): string {
+  return panel.dataVolume ?? '/data'
+}
+
+/**
+ * The state *file* a panel should be pointed at, inside {@link panelDataDir}.
+ * Panel env vars take a file path — giving sqlite3 a directory is a boot crash.
+ */
+export function panelDataFile(panel: PanelSpec): string {
+  return panel.dataFile ?? `${panelDataDir(panel)}/panel.db`
+}
+
 export function panelRepoUrl(panel: PanelSpec): string {
   return `https://github.com/${panel.repo}.git`
 }

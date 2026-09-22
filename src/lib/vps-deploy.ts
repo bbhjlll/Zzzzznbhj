@@ -10,7 +10,7 @@
  * The wizard calls these for the "download a ZIP" paths; the automated paths use
  * worker/railway.ts and worker/render.ts, which read the same catalog.
  */
-import { panelRepoUrl, resolvePanel, type PanelSpec } from '../../shared/panels'
+import { panelDataDir, panelDataFile, panelRepoUrl, resolvePanel, type PanelSpec } from '../../shared/panels'
 
 export interface VpsDeployConfig {
   name: string
@@ -25,7 +25,7 @@ export interface VpsDeployConfig {
 const panelOf = (cfg: VpsDeployConfig): PanelSpec => resolvePanel(cfg.panel)
 const portOf = (cfg: VpsDeployConfig, p: PanelSpec) => cfg.port || String(p.port)
 const healthOf = (p: PanelSpec) => p.healthPath ?? p.panelPath
-const dataPathOf = (p: PanelSpec) => p.dataVolume ?? '/data'
+const dataPathOf = panelDataDir
 /** Container/service slug used by the generated compose + nginx. */
 const serviceOf = (p: PanelSpec) => p.id
 
@@ -159,7 +159,7 @@ export function generateEnvFile(cfg: VpsDeployConfig): string {
 ${p.env.adminPassword ?? 'ADMIN_PASSWORD'}=${admin}
 ${p.env.secretKey ?? 'SECRET_KEY'}=${secret}
 ${p.env.port ?? 'PORT'}=${port}
-${p.env.dataDir ?? 'SQLITE_PATH'}=${dataPathOf(p)}/panel.db
+${p.env.dataDir ?? 'SQLITE_PATH'}=${panelDataFile(p)}
 ${p.env.publicDomain ?? 'PUBLIC_BASE_URL'}=${cfg.domain ? `https://${cfg.domain}` : ''}
 XRAY_ENABLED=1
 NEXUS_PLATFORM=vps

@@ -10,12 +10,21 @@
  *   → env vars + start command → serviceInstanceDeployV2 → poll until SUCCESS
  */
 
-import type { PanelSpec } from '../shared/panels'
+import { panelDataDir, panelDataFile, type PanelSpec } from '../shared/panels'
 
 export class RailwayApiError extends Error {
-  constructor(message: string) {
+  /**
+   * True when Railway answered an explicit authorization denial. A *brand-new*
+   * token is refused with exactly this response for a short window while
+   * Railway propagates it, so callers use the flag to retry once instead of
+   * telling the user their credential is bogus.
+   */
+  readonly denied: boolean
+
+  constructor(message: string, denied = false) {
     super(message)
     this.name = 'RailwayApiError'
+    this.denied = denied
   }
 }
 
@@ -26,13 +35,43 @@ interface GqlResponse {
   errors?: Array<{ message?: string; extensions?: { code?: string } }>
 }
 
-/** Raw GraphQL call; throws RailwayApiError with a user-friendly message. */
-async function gql(token: string, query: string, variables: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+/**
+ * Railway mounts volumes as root, while panel images commonly drop to an
+ * unprivileged user (the catalog panel runs as `appuser`, uid 10001) and then
+ * cannot create its SQLite file on the mount — the app dies on boot with
+ * "unable to open database file". `RAILWAY_RUN_UID=0` is Railway's documented
+ * way to run the container as root so it can own its own data volume.
+ * Verified against a live deploy: without it the panel crash-looped.
+ */
+const RUN_AS_ROOT_VAR = 'RAILWAY_RUN_UID'
+
+/** Account/workspace/OAuth tokens go in `Authorization`; project tokens do not. */
+type Headers = Record<string, string>
+const bearerHeaders = (token: string): Headers => ({
+  'Content-Type': 'application/json',
+  Authorization: `Bearer ${token}`,
+})
+/** Project/Environment tokens authenticate with their own header (Railway docs). */
+const projectHeaders = (token: string): Headers => ({
+  'Content-Type': 'application/json',
+  'Project-Access-Token': token,
+})
+
+/** How long to wait before one retry of an authorization denial. */
+const AUTH_RETRY_MS = 1500
+
+
+/** One GraphQL round-trip; throws RailwayApiError with a user-friendly message. */
+async function gqlOnce(
+  headers: Headers,
+  query: string,
+  variables: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
   let resp: Response
   try {
     resp = await fetch(RAILWAY_ENDPOINT, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers,
       body: JSON.stringify({ query, variables }),
     })
   } catch {
@@ -55,19 +94,73 @@ async function gql(token: string, query: string, variables: Record<string, unkno
   if (errors.length) {
     const msgs = errors.map((e) => e.message ?? 'خطای نامشخص').filter(Boolean)
     if (msgs.some((m) => /not authorized|unauthorized|forbidden|invalid/i.test(m))) {
-      throw new RailwayApiError('توکن Railway نامعتبر است یا دسترسی کافی ندارد (از railway.com/account/tokens توکن Account بسازید)')
+      // Either the credential really is bad, or Railway answered a denial for a
+      // token that would work on the next try (see gql), so both are named.
+      throw new RailwayApiError(
+        'توکن Railway نامعتبر است یا دسترسی کافی ندارد — ابتدا یک‌بار دیگر تلاش کنید و اگر باز هم رد شد، از railway.com/account/tokens یک توکن «Account» بسازید',
+        true,
+      )
     }
     throw new RailwayApiError(msgs.join(' — ') || 'خطای Railway API')
   }
   return data.data ?? {}
 }
 
+/**
+ * Raw GraphQL call with one retry on an authorization denial.
+ *
+ * Observed while integrating: Railway answers a bare `Not Authorized` for a
+ * token that is in fact valid — the identical request succeeds moments later,
+ * and the same token verifies consistently through a second HTTP client. One
+ * retry therefore keeps a working credential from being reported as invalid,
+ * while a persistent denial still surfaces as a clear error.
+ */
+async function gql(token: string, query: string, variables: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  try {
+    return await gqlOnce(bearerHeaders(token), query, variables)
+  } catch (err) {
+    if (!(err instanceof RailwayApiError) || !err.denied) throw err
+    await new Promise((resolve) => setTimeout(resolve, AUTH_RETRY_MS))
+    return await gqlOnce(bearerHeaders(token), query, variables)
+  }
+}
+
+/**
+ * Is this a *Project/Environment* token rather than an Account token?
+ *
+ * Both kinds are UUIDs, so the shape tells us nothing — but a project token is
+ * a real Railway credential that simply cannot answer account-level queries
+ * (`me` answers "Not Authorized"). Asking Railway directly lets us explain the
+ * difference instead of calling a valid credential "invalid".
+ *
+ * The probe must use the `Project-Access-Token` header: that is the only header
+ * project tokens are accepted in, so a Bearer probe could never identify one.
+ */
+async function isRailwayProjectToken(token: string): Promise<boolean> {
+  try {
+    const data = await gqlOnce(projectHeaders(token), 'query { projectToken { projectId environmentId } }')
+    const pt = data.projectToken as { projectId?: string; environmentId?: string } | undefined
+    return Boolean(pt?.projectId || pt?.environmentId)
+  } catch {
+    return false
+  }
+}
+
 /** Confirm a token belongs to a real Railway account and read its owner. */
 export async function verifyRailwayToken(token: string): Promise<{ name: string; email: string }> {
-  const data = await gql(token, 'query { me { name email } }')
-  const me = data.me as { name?: string; email?: string } | undefined
-  if (!me) throw new RailwayApiError('توکن Railway قابل تأیید نیست')
-  return { name: me.name ?? '', email: me.email ?? '' }
+  try {
+    const data = await gql(token, 'query { me { name email } }')
+    const me = data.me as { name?: string; email?: string } | undefined
+    if (!me) throw new RailwayApiError('توکن Railway قابل تأیید نیست')
+    return { name: me.name ?? '', email: me.email ?? '' }
+  } catch (err) {
+    if (err instanceof RailwayApiError && (await isRailwayProjectToken(token))) {
+      throw new RailwayApiError(
+        'این توکن «Project/Environment» است، نه توکن حساب — از railway.com/account/tokens (Account Settings → Tokens → Create Token) یک توکن Account بسازید و همان را وارد کنید',
+      )
+    }
+    throw err
+  }
 }
 
 export interface RailwayDeployResult {
@@ -188,18 +281,38 @@ export async function deployToRailway(
     /* the domain can still be generated later from the dashboard */
   }
 
+  // 3d. Attach a persistent volume to the panel's data directory. Railway wipes
+  //     the container filesystem on every redeploy, so a panel that keeps its
+  //     users/config in SQLite would silently reset to defaults without this.
+  if (panel.env.dataDir) {
+    await gql(
+      token,
+      'mutation ($input: VolumeCreateInput!) { volumeCreate(input: $input) { id } }',
+      { input: { projectId, environmentId, serviceId, mountPath: panelDataDir(panel) } },
+    ).catch(() => null)
+  }
+
   // 4. Set the panel's env vars so it starts configured on first boot
   //    (PORT + the generated admin credentials, when the panel understands them).
   const envVars: Array<[string, string]> = []
   if (panel.env.port) envVars.push([panel.env.port, String(panel.port)])
   if (panel.env.adminPassword) envVars.push([panel.env.adminPassword, values.adminPassword])
   if (panel.env.secretKey) envVars.push([panel.env.secretKey, values.secretKey])
-  if (panel.env.dataDir) envVars.push([panel.env.dataDir, '/data'])
+  // The panel wants the *file* inside the volume: pointing SQLITE_PATH at the
+  // mount directory itself crashes the app on boot ("unable to open database
+  // file"), which is exactly how a live Railway deploy failed before this.
+  if (panel.env.dataDir) envVars.push([panel.env.dataDir, panelDataFile(panel)])
+  // Only when a volume is attached: the container needs to own the root-owned
+  // mount, and images that run as an unprivileged user otherwise cannot.
+  if (panel.env.dataDir) envVars.push([RUN_AS_ROOT_VAR, '0'])
   for (const [name, value] of envVars) {
+    // `skipDeploys` matters: every variable write otherwise starts its own
+    // deployment, so a panel would build three or four times in a row (wasting
+    // build minutes and flapping the service) before the real deploy below.
     await gql(
       token,
       'mutation ($input: VariableUpsertInput!) { variableUpsert(input: $input) }',
-      { input: { projectId, environmentId, serviceId, name, value } },
+      { input: { projectId, environmentId, serviceId, name, value, skipDeploys: true } },
     ).catch(() => null)
   }
 

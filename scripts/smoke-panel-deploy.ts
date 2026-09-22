@@ -12,9 +12,10 @@
  *     health path from our stored URL
  */
 import { startPanelDeploy, watchPanelDeploy, listPanelDeploys, forgetPanelDeploy, probePanelHealth } from '../worker/panel-deploy'
+import { verifyRailwayToken, RailwayApiError } from '../worker/railway'
 
 // ── fetch mocking ────────────────────────────────────────────────────────────
-const calls: Array<{ url: string; method: string; body?: string }> = []
+const calls: Array<{ url: string; method: string; body?: string; headers?: Record<string, string> }> = []
 let gqlQueue: Array<Record<string, unknown>> = []
 let renderQueue: Array<{ status: number; body: unknown }> = []
 let setupStatus = 200
@@ -26,11 +27,17 @@ function installFetch() {
     const url = String(input)
     const method = init?.method ?? 'GET'
     const body = typeof init?.body === 'string' ? init.body : undefined
-    calls.push({ url, method, body })
+    const headers = (init?.headers ?? undefined) as Record<string, string> | undefined
+    calls.push({ url, method, body, headers })
 
     if (url.includes('backboard.railway.com')) {
-      const data = gqlQueue.shift() ?? {}
-      return new Response(JSON.stringify({ data }), { status: 200 })
+      const next = gqlQueue.shift() ?? {}
+      // A queued `__errors` item models a Railway GraphQL failure (Railway
+      // answers HTTP 200 with an errors array, exactly like the real API).
+      if (Array.isArray(next.__errors)) {
+        return new Response(JSON.stringify({ errors: next.__errors }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ data: next }), { status: 200 })
     }
     if (url.includes('api.render.com')) {
       const next = renderQueue.shift() ?? { status: 200, body: {} }
@@ -204,8 +211,10 @@ async function main() {
     { serviceCreate: { id: 'svc1' } },                              // serviceCreate
     {},                                                             // instanceUpdate
     { serviceDomainCreate: { domain: 'my-app.up.railway.app' } },   // domain
-    {}, {}, {},                                                     // variableUpserts (PORT/ADMIN_PASSWORD/JWT_SECRET)
-    {},                                                             // variableUpserts (SQLITE_PATH)
+    { volumeCreate: { id: 'vol1' } },                               // data volume
+    // One variableUpsert per env var: PORT, ADMIN_PASSWORD, JWT_SECRET,
+    // SQLITE_PATH and RAILWAY_RUN_UID.
+    {}, {}, {}, {}, {},
     { serviceInstanceDeployV2: 'dep1' },                            // deploy trigger
   ]
   r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'my-app', panel })
@@ -265,6 +274,30 @@ async function main() {
   check('spec is attached (name/path/health)', railRow.panelName === panel.name && railRow.panelPath === panel.panelPath && railRow.healthPath === (panel.healthPath ?? panel.panelPath))
   check('railway panel url + dashboard link', railRow.panelUrl === 'https://my-app.up.railway.app/login' && railRow.dashboardUrl === 'https://railway.com/project/prj1', `${railRow.panelUrl} | ${railRow.dashboardUrl}`)
   check('render panel url + dashboard link', rendRow.panelUrl === 'https://render-app.onrender.com/login' && rendRow.dashboardUrl === 'https://dashboard.render.com/web/srv1', `${rendRow.panelUrl} | ${rendRow.dashboardUrl}`)
+  // A panel that stores state on disk only survives a redeploy with a volume,
+  // so the engine must ask for one at the panel's data path.
+  const volCall = calls.find((c) => (c.body ?? '').includes('volumeCreate'))
+  check('data volume requested at /data', !!volCall && (volCall.body ?? '').includes('/data'), volCall?.body?.slice(0, 160))
+  // Regression: the panel is handed the SQLite *file* inside the volume. Passing
+  // the mount directory itself makes sqlite3 fail on boot (a live Railway
+  // deploy crashed with "unable to open database file" because of it).
+  const dataVarBody = calls.map((c) => c.body ?? '').find((b) => b.includes(panel.env.dataDir!)) ?? ''
+  check('panel state var points at a file, not the mount dir', dataVarBody.includes('"' + panel.dataFile + '"'), dataVarBody.slice(0, 220))
+  // Railway volumes are root-owned; a panel image running as an unprivileged
+  // user cannot write to its mount, so the deploy must opt into running as root
+  // (verified live: without this the panel crash-looped on boot).
+  check(
+    'container is allowed to own its volume',
+    calls.some((c) => (c.body ?? '').includes('RAILWAY_RUN_UID') && (c.body ?? '').includes('"0"')),
+  )
+  // Regression: one variable write must not start its own deployment, or the
+  // panel builds once per env var before the real deploy.
+  const varBodies = calls.map((c) => c.body ?? '').filter((b) => b.includes('variableUpsert'))
+  check(
+    'variable writes skip their own deploy',
+    varBodies.length > 0 && varBodies.every((b) => b.includes('"skipDeploys":true')),
+    `${varBodies.length} writes`,
+  )
   const dates = registry.map((r) => String(r.createdAt ?? ''))
   check('newest first', dates.every((d, i) => i === 0 || dates[i - 1] >= d), dates.join(' > '))
 
@@ -284,6 +317,58 @@ async function main() {
   const notMine = await forgetPanelDeploy(env as never, 'u1', 'railway', 'other')
   check('another user’s panel cannot be forgotten', notMine.ok === false)
   check('it is still there', env.tables.railway_deploys.has('other'))
+
+  console.log('10) railway token diagnosis — Account vs Project token')
+  const denied = [{ message: 'Not Authorized', extensions: { code: 'INTERNAL_SERVER_ERROR' } }]
+  // A project token is valid but account-level queries are refused: the error
+  // must name the token kind, not claim the credential is bogus. The denial is
+  // answered twice because a denial is retried once before it is believed.
+  gqlQueue = [
+    { __errors: denied },
+    { __errors: denied },
+    { projectToken: { projectId: 'prj1', environmentId: 'env1' } },
+  ]
+  let projectMsg = ''
+  try {
+    await verifyRailwayToken('11111111-2222-3333-4444-555555555555')
+  } catch (e) {
+    projectMsg = e instanceof RailwayApiError ? e.message : `wrong error: ${String(e)}`
+  }
+  check('project token named as such', projectMsg.includes('Project'), projectMsg)
+  check('project token hint points at Account tokens', projectMsg.includes('/account/tokens'), projectMsg)
+  // Project tokens are only accepted in their own header (Railway docs) — a
+  // Bearer-only probe could never recognise one.
+  check(
+    'project probe used the Project-Access-Token header',
+    calls.some((c) => !!c.headers && 'Project-Access-Token' in c.headers),
+  )
+
+  // A blanket denial is retried once (a fresh token is refused while Railway
+  // propagates it) before the caller sees any error at all.
+  gqlQueue = [{ __errors: denied }, { me: { id: 'u1', name: 'Recovered' } }]
+  let retried: { name: string; email: string } | null = null
+  let retryErr = ''
+  try {
+    retried = await verifyRailwayToken('11111111-2222-3333-4444-555555555555')
+  } catch (e) {
+    retryErr = String(e)
+  }
+  check('denied call is retried and then accepted', retried?.name === 'Recovered', retryErr)
+  check('only two attempts were made', gqlQueue.length === 0, `left ${gqlQueue.length}`)
+
+  // A token Railway does not recognise at all keeps the generic message.
+  gqlQueue = [
+    { __errors: denied },
+    { __errors: denied },
+    { __errors: [{ message: 'Project Token not found' }] },
+  ]
+  let unknownMsg = ''
+  try {
+    await verifyRailwayToken('11111111-2222-3333-4444-555555555555')
+  } catch (e) {
+    unknownMsg = e instanceof RailwayApiError ? e.message : `wrong error: ${String(e)}`
+  }
+  check('unknown token rejected generically', unknownMsg.includes('نامعتبر') && !unknownMsg.includes('Project/Environment'), unknownMsg)
 
   console.log(`\n${pass} passed, ${fail} failed`)
   globalThis.fetch = realFetch

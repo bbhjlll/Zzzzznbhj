@@ -14,7 +14,7 @@
  *   GET  /v1/deploys/{id} → status (created → build_in_progress → live)
  */
 
-import type { PanelSpec } from '../shared/panels'
+import { panelDataFile, type PanelSpec } from '../shared/panels'
 
 export class RenderApiError extends Error {
   constructor(message: string) {
@@ -132,11 +132,14 @@ function buildRenderYaml(name: string, panel: PanelSpec, values: PanelDeployEnv)
     )
   }
 
+
   const envVars: Array<[string, string]> = []
   if (panel.env.port) envVars.push([panel.env.port, String(panel.port)])
   if (panel.env.adminPassword) envVars.push([panel.env.adminPassword, values.adminPassword])
   if (panel.env.secretKey) envVars.push([panel.env.secretKey, values.secretKey])
-  if (panel.env.dataDir) envVars.push([panel.env.dataDir, '/data'])
+  // A file inside the disk, never the disk's mount path itself — panels open
+  // this value with sqlite3, which cannot open a directory.
+  if (panel.env.dataDir) envVars.push([panel.env.dataDir, panelDataFile(panel)])
 
   if (envVars.length) {
     lines.push('    envVars:')
