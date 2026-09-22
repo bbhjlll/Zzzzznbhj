@@ -6,8 +6,12 @@
  *   • platform mismatch (Railway-only panel + Render token) is rejected
  *   • watchPanelDeploy performs the one-time admin bootstrap + returns the
  *     credentials on the first live poll, then reports firstLive=false
+ *   • the hosted-panel registry the dashboard/deployments/bot read:
+ *     listPanelDeploys flattens both platform tables, forgetPanelDeploy drops
+ *     exactly one owned row and probePanelHealth fetches the panel's own
+ *     health path from our stored URL
  */
-import { startPanelDeploy, watchPanelDeploy } from '../worker/panel-deploy'
+import { startPanelDeploy, watchPanelDeploy, listPanelDeploys, forgetPanelDeploy, probePanelHealth } from '../worker/panel-deploy'
 
 // ── fetch mocking ────────────────────────────────────────────────────────────
 const calls: Array<{ url: string; method: string; body?: string }> = []
@@ -109,7 +113,56 @@ function makeDb() {
     }
     return asSelect ? null : { meta: { changes: 1 } }
   }
-  return { DB: { prepare: (sql: string) => ({ bind: (...binds: unknown[]) => ({ run: async () => exec(sql, binds), first: async <T>() => exec(sql, binds, true) as T | null, all: async <T>() => ({ results: [] as T[] }) }) }) }, tables }
+
+  /** SELECT … (no WHERE support beyond `user_id = ?`) → every matching row. */
+  function execAll(sql: string, binds: unknown[]): Row[] {
+    const sel = sql.match(/FROM (\w+)/)
+    if (!sel) return []
+    const t = tables[sel[1]]
+    if (!t) return []
+    const cols = sql
+      .slice(sql.toUpperCase().indexOf('SELECT') + 6, sql.toUpperCase().indexOf('FROM'))
+      .split(',')
+      .map((c) => c.trim().split(/\s+AS\s+/i)[0])
+    const scoped = /user_id\s*=\s*\?/.test(sql)
+    const userId = scoped ? String(binds[binds.length - 1]) : null
+    const rows: Row[] = []
+    for (const r of t.values()) {
+      if (userId && String(r['user_id']) !== userId) continue
+      const out: Row = {}
+      for (const c of cols) out[c] = r[c]
+      rows.push(out)
+    }
+    return rows
+  }
+
+  /** DELETE … RETURNING (the shape panel-deploy uses for `forgetPanelDeploy`). */
+  function execDelete(sql: string, binds: unknown[]): Row | null {
+    const del = sql.match(/DELETE FROM (\w+)/)
+    if (!del) return null
+    const t = tables[del[1]]
+    if (!t) return null
+    for (const [key, row] of [...t.entries()]) {
+      if (String(row['id']) === String(binds[0]) && String(row['user_id']) === String(binds[1])) {
+        t.delete(key)
+        return { name: row['name'] ?? null }
+      }
+    }
+    return null
+  }
+
+  return {
+    DB: {
+      prepare: (sql: string) => ({
+        bind: (...binds: unknown[]) => ({
+          run: async () => (/DELETE FROM/i.test(sql) ? { meta: { changes: execDelete(sql, binds) ? 1 : 0 } } : exec(sql, binds)),
+          first: async <T>() => (/DELETE FROM/i.test(sql) ? (execDelete(sql, binds) as T | null) : (exec(sql, binds, true) as T | null)),
+          all: async <T>() => ({ results: execAll(sql, binds) as T[] }),
+        }),
+      }),
+    },
+    tables,
+  }
 }
 
 async function main() {
@@ -196,6 +249,41 @@ async function main() {
   const railOnlyPanel = { ...panel, targets: ['railway'] as typeof panel.targets }
   r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rd1', name: 'cross-app', panel: railOnlyPanel })
   check('railway-only panel + render key rejected', !r.ok && r.error.includes('Render'))
+
+  console.log('7) panel registry — list flattens both platforms')
+  env.tables.render_deploys.set('rnd1', {
+    id: 'rnd1', user_id: 'u1', token_id: 'rd1', service_id: 'srv1', name: 'render-app',
+    panel: panel.id, url: 'https://render-app.onrender.com', admin_username: 'admin',
+    admin_password: 'renderpass1234', setup_done: 1, created_at: '2026-05-02T00:00:00.000Z',
+  })
+  env.tables.railway_deploys.set('other', { id: 'other', user_id: 'u2', panel: panel.id, project_id: 'p9', setup_done: 0, created_at: '2026-05-03T00:00:00.000Z' })
+  const registry = await listPanelDeploys(env as never, 'u1')
+  check('only the caller’s panels are listed', registry.every((r) => r.id !== 'other'), JSON.stringify(registry.map((r) => r.id)))
+  check('both platforms are present', new Set(registry.map((r) => r.platform)).size === 2, registry.map((r) => r.platform).join(','))
+  const railRow = registry.find((r) => r.platform === 'railway')!
+  const rendRow = registry.find((r) => r.platform === 'render')!
+  check('spec is attached (name/path/health)', railRow.panelName === panel.name && railRow.panelPath === panel.panelPath && railRow.healthPath === (panel.healthPath ?? panel.panelPath))
+  check('railway panel url + dashboard link', railRow.panelUrl === 'https://my-app.up.railway.app/login' && railRow.dashboardUrl === 'https://railway.com/project/prj1', `${railRow.panelUrl} | ${railRow.dashboardUrl}`)
+  check('render panel url + dashboard link', rendRow.panelUrl === 'https://render-app.onrender.com/login' && rendRow.dashboardUrl === 'https://dashboard.render.com/web/srv1', `${rendRow.panelUrl} | ${rendRow.dashboardUrl}`)
+  const dates = registry.map((r) => String(r.createdAt ?? ''))
+  check('newest first', dates.every((d, i) => i === 0 || dates[i - 1] >= d), dates.join(' > '))
+
+  console.log('8) health probe uses the stored url, never the request')
+  const health = await probePanelHealth(env as never, 'u1', 'railway', 'dep1')
+  check('probe hit the panel health path', calls.some((c) => c.url === `https://my-app.up.railway.app${panel.healthPath ?? panel.panelPath}`), JSON.stringify(calls.at(-1)))
+  check('healthy response reported', health.ok && health.status === setupStatus, JSON.stringify(health))
+  const foreign = await probePanelHealth(env as never, 'u1', 'railway', 'other')
+  check('other users’ panels are refused', !foreign.ok && !!foreign.error, JSON.stringify(foreign))
+
+  console.log('9) forget drops exactly one owned row + logs it')
+  const before = env.tables.activity_logs.size
+  const forgotten = await forgetPanelDeploy(env as never, 'u1', 'render', 'rnd1')
+  check('forgotten ok', forgotten.ok === true, JSON.stringify(forgotten))
+  check('row gone', !env.tables.render_deploys.has('rnd1'))
+  check('activity logged', env.tables.activity_logs.size === before + 1)
+  const notMine = await forgetPanelDeploy(env as never, 'u1', 'railway', 'other')
+  check('another user’s panel cannot be forgotten', notMine.ok === false)
+  check('it is still there', env.tables.railway_deploys.has('other'))
 
   console.log(`\n${pass} passed, ${fail} failed`)
   globalThis.fetch = realFetch

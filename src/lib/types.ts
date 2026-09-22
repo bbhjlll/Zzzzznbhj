@@ -210,3 +210,69 @@ export interface WorkerMember {
   settings: MemberSettings
   created_at: string
 }
+
+// ── Hosted panel (the dedicated catalog panel) ──────────────────────────────
+
+/** Static spec of the panel this installation deploys, straight from the API. */
+export interface HostedPanelSpec {
+  id: string
+  name: string
+  tagline: string
+  repo: string
+  repoUrl: string
+  port: number
+  extraPorts: number[]
+  panelPath: string
+  healthPath: string
+  origin: string | null
+  targets: string[]
+  dataVolume: string | null
+  notes: string | null
+  lastCommit: string | null
+  verifiedAt: string | null
+}
+
+/** One deployment of that panel on Railway or Render. */
+export interface HostedPanelDeploy {
+  platform: 'railway' | 'render'
+  id: string
+  name: string | null
+  panel: string
+  panelName: string
+  panelPath: string
+  healthPath: string
+  domain: string | null
+  url: string | null
+  panelUrl: string | null
+  adminUsername: string | null
+  adminPassword: string | null
+  setupDone: boolean
+  dashboardUrl: string | null
+  createdAt: string | null
+}
+
+export interface HostedPanelOverview {
+  panel: HostedPanelSpec
+  deploys: HostedPanelDeploy[]
+}
+
+/** Result of polling one hosted panel (`POST /panels/watch`). */
+export interface HostedPanelWatch {
+  state: 'pending' | 'failed' | 'live'
+  status: string
+  url: string | null
+  panelPath?: string
+  panelName?: string
+  adminUsername?: string | null
+  adminPassword?: string | null
+  firstLive?: boolean
+}
+
+/** Result of the edge health probe (`POST /panels/health`). */
+export interface HostedPanelHealth {
+  ok: boolean
+  status: number | null
+  ms: number
+  url: string | null
+  error?: string
+}

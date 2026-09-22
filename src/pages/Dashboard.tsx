@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import PanelDeploys from '../components/PanelDeploys'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import {
@@ -159,6 +160,9 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* The panel this installation is built around — always the first block. */}
+      <PanelDeploys variant="card" />
 
       {/* Cloudflare daily-request quota monitor */}
       {quota && (

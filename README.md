@@ -131,6 +131,7 @@ npm run deploy     # بیلد فرانت + اسکیمای D1 (idempotent) + wran
 <tr><td><b>⚙️ gRPC/XHTTP</b></td><td>روشن‌کردن خودکار gRPC + WebSockets روی زون‌ها موقع استقرار — نودها بدون تداخل با کلودفلر کار می‌کنند</td></tr>
 <tr><td><b>⚡ سرعت</b></td><td>استاتیک‌ها از CDN لبه بدون اجرای ورکر + Smart Placement کنار D1 + کش immutable یک‌ساله</td></tr>
 <tr><td><b>🧩 چند زیرساخت</b></td><td>استقرار روی Cloudflare (Workers/Pages)، Railway، Render.com و هر VPS با Docker — کاتالوگ استقرار فقط یک پنل دارد: <b>پنل اختصاصی ما</b> (NEXUS / Mizetusi) با تولید خودکار Dockerfile / docker-compose / railway.toml / render.yaml · سورس‌های ورکر کلودفلر کاتالوگ جدا و دست‌نخورده‌ای دارند</td></tr>
+<tr><td><b>🧩 پنل اختصاصی در همه‌جای برنامه</b></td><td>پنل اختصاصی یک بخش درجه‌اول است، نه فقط یک گزینه در ویزارد: کارت اختصاصی در داشبورد (فهرست استقرارها، لینک ورود به پنل، داشبورد Railway/Render، رمز ادمین یک‌بارمصرف، «بررسی زنده» و «بررسی سلامت»)، تب <b>پنل اختصاصی</b> در صفحهٔ «ورکرها و پنل» (لینک عمیق <code>?tab=panels</code>)، بنر راهنما در «کاربران ورکر»، بخش مربوطه در راهنما، و ربات تلگرام. همهٔ این‌ها از یک API تغذیه می‌شوند: <code>GET /api/panels</code> (مشخصات پنل + استقرارهای کاربر)، <code>POST /api/panels/watch</code> (بررسی زندهٔ پلتفرم)، <code>POST /api/panels/health</code> (تست <code>/health</code> خودِ پنل از لبه) و <code>POST /api/panels/forget</code> (حذف از فهرست — سرویس روی پلتفرم به کار خود ادامه می‌دهد)</td></tr>
 <tr><td><b>🤖 ربات تلگرام</b></td><td>معماری سه‌لایه (<code>telegram-core</code> / <code>telegram-ui</code> / <code>telegram</code>) — کیبورد دائمی، صفحه‌های تک‌پیامی که درجا ویرایش می‌شوند، ویزارد استقرار ورکر کلودفلر **و استقرار پنل روی Railway/Render** (روش ← منبع/پنل ← توکن ← تأیید، با نمایش یک‌بار رمز ادمین و دکمهٔ بررسی زندهٔ وضعیت)، جست‌وجو، لینک‌های عمیق <code>?start=workers</code>، فضای اختصاصی هر کاربر تلگرام (<code>?start=&lt;token&gt;</code>) و اعلان لحظه‌ای پنل‌های Railway/Render</td></tr>
 <tr><td><b>🔐 ربات عمومی استقرار</b></td><td>یک ربات برای همه، ولی فضای هر کاربر جداست: هر کاربر تلگرام با <code>/start</code> یک توکن و لینک اختصاصی می‌گیرد و فقط توکن‌ها، ورکرها و استقرارهای خودش را می‌بیند. استقرارها با توکن Cloudflare/Railway/Render خودِ کاربر انجام می‌شود و توکن‌ها را می‌توان از داخل خود تلگرام (<code>🔑 توکن‌ها → ➕</code>) اضافه/غیرفعال/حذف کرد (اعتبارسنجی قبل از ذخیره + پاک‌کردن پیام حاوی توکن). تب ربات در پنل وب فقط برای مالک نمایش داده می‌شود (مالک با <code>OWNER_EMAIL</code> در <code>[vars]</code> فایل <code>wrangler.toml</code> مشخص می‌شود و اگر آن حساب ثبت‌نام نکرده باشد، اولین حساب پنل مالک می‌ماند) و بقیهٔ کاربران و مدیران پنل آن را نمی‌بینند؛ ربات هیچ بخش مدیریت پنل ندارد</td></tr>
 </table>
@@ -216,14 +217,15 @@ npx wrangler deploy -c public/repo/nexus-wrangler.toml
 
 ```
 ├── src/                    # فرانت‌اند (React + Vite)
-│   ├── pages/              # داشبورد، ورکرها، کاربران، بهینه‌ساز، اسکنر...
-│   ├── components/         # LiveGuide، Layout و...
+│   ├── pages/              # داشبورد، ورکرها و پنل، کاربران، بهینه‌ساز، اسکنر...
+│   ├── components/         # PanelDeploys (پنل اختصاصی)، LiveGuide، Layout و...
 │   └── lib/                # تایپ‌ها، متن راهنماها، API client
 ├── worker/                 # بک‌اند Cloudflare Worker
 │   ├── index.ts            # روتر /api/*
 │   ├── parser.ts           # موتور پارسر جهانی
 │   ├── members.ts          # ساب اختصاصی هر کاربر
 │   ├── deploy.ts           # استقرار ورکر با API کلودفلر
+│   ├── panel-deploy.ts     # موتور استقرار/پایش پنل اختصاصی (Railway · Render)
 │   └── ...
 ├── d1/schema.sql           # اسکیمای کامل دیتابیس
 └── wrangler.toml           # کانفیگ Cloudflare

@@ -4,7 +4,7 @@ import { handleSignup, handleLogin, handleLogout, handleMe, isOwner } from './au
 import { startDeployment } from './deploy'
 import { verifyRailwayToken, RailwayApiError } from './railway'
 import { verifyRenderToken, RenderApiError } from './render'
-import { startPanelDeploy, watchPanelDeploy } from './panel-deploy'
+import { startPanelDeploy, watchPanelDeploy, listPanelDeploys, forgetPanelDeploy, probePanelHealth } from './panel-deploy'
 import { handleWorkerConfig } from './kvconfig'
 import { handleIpScanner, handleRangeScan } from './scanner'
 import { handleTelegramWebhook } from './telegram'
@@ -148,6 +148,74 @@ async function handleRailwayDeploy(env: Env, userId: string, request: Request): 
       admin_password: started.adminPassword,
     },
   })
+}
+
+// ── Hosted panel registry (the dedicated catalog panel) ──────────────────────
+
+/**
+ * The catalog panel plus every deployment of it this user owns.
+ *
+ * One request feeds the whole "پنل اختصاصی ما" surface: the dashboard card,
+ * the panels tab and the bot all read this shape, so the spec (path, health
+ * path, port, volume) and the deployments can never disagree.
+ */
+async function handlePanelList(env: Env, userId: string, origin: string): Promise<Response> {
+  const panel = resolvePanel(undefined)
+  const deploys = await listPanelDeploys(env, userId)
+  return json({
+    data: {
+      panel: {
+        id: panel.id,
+        name: panel.name,
+        tagline: panel.tagline,
+        repo: panel.repo,
+        repoUrl: panel.url,
+        port: panel.port,
+        extraPorts: panel.extraPorts ?? [],
+        panelPath: panel.panelPath,
+        healthPath: panel.healthPath ?? panel.panelPath,
+        origin: panel.origin ?? null,
+        targets: panel.targets,
+        dataVolume: panel.dataVolume ?? null,
+        notes: panel.notes ?? null,
+        lastCommit: panel.lastCommit ?? null,
+        verifiedAt: panel.verifiedAt ?? null,
+      },
+      deploys,
+      origin,
+    },
+  })
+}
+
+/** Poll one hosted panel; the live transition bootstraps its admin once. */
+async function handlePanelWatch(env: Env, userId: string, request: Request): Promise<Response> {
+  const body = safeJsonParse<{ platform?: string; id?: string }>(await request.text().catch(() => ''), {})
+  const platform = panelPlatformOf(body.platform)
+  if (!platform || !body.id) return apiError('پلتفرم و شناسهٔ استقرار الزامی است')
+  return json({ data: await watchPanelDeploy(env, userId, platform, body.id) })
+}
+
+/** Health-probe a hosted panel from the edge (URL comes from our own record). */
+async function handlePanelHealth(env: Env, userId: string, request: Request): Promise<Response> {
+  const body = safeJsonParse<{ platform?: string; id?: string }>(await request.text().catch(() => ''), {})
+  const platform = panelPlatformOf(body.platform)
+  if (!platform || !body.id) return apiError('پلتفرم و شناسهٔ استقرار الزامی است')
+  return json({ data: await probePanelHealth(env, userId, platform, body.id) })
+}
+
+/** Forget a panel record (the service itself keeps running on the platform). */
+async function handlePanelForget(env: Env, userId: string, request: Request): Promise<Response> {
+  const body = safeJsonParse<{ platform?: string; id?: string }>(await request.text().catch(() => ''), {})
+  const platform = panelPlatformOf(body.platform)
+  if (!platform || !body.id) return apiError('پلتفرم و شناسهٔ استقرار الزامی است')
+  const forgotten = await forgetPanelDeploy(env, userId, platform, body.id)
+  if (!forgotten.ok) return apiError(forgotten.error, 404)
+  return json({ success: true })
+}
+
+/** Narrow a request field to a supported deployment platform. */
+function panelPlatformOf(value?: string): 'railway' | 'render' | null {
+  return value === 'railway' || value === 'render' ? value : null
 }
 
 // ── Render.com tokens & auto-deploy ──────────────────────────────────────────
@@ -654,6 +722,12 @@ async function handleRouted(
     if (path.match(/^\/api\/render\/tokens\/[^/]+$/) && method === 'DELETE') return await deleteRenderToken(env, user.id, path.split('/')[4])
     if (path === '/api/render/deploy' && method === 'POST') return await handleRenderDeploy(env, user.id, request)
     if (path === '/api/render/status' && method === 'GET') return await handleRenderStatus(env, user.id, url)
+
+    // ── Hosted panel registry (the dedicated catalog panel) ───────────────
+    if (path === '/api/panels' && method === 'GET') return await handlePanelList(env, user.id, origin)
+    if (path === '/api/panels/watch' && method === 'POST') return await handlePanelWatch(env, user.id, request)
+    if (path === '/api/panels/health' && method === 'POST') return await handlePanelHealth(env, user.id, request)
+    if (path === '/api/panels/forget' && method === 'POST') return await handlePanelForget(env, user.id, request)
 
     if (path === '/api/deployments' && method === 'GET') return await listDeployments(env, user.id, url)
     if (path === '/api/deployments' && method === 'POST') return await createDeployment(env, user.id, request, ctx, origin)

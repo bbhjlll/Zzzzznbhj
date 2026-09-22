@@ -9,7 +9,8 @@ import {
   Globe, Shield, Network, Server, Radar, ScanLine, Wifi, Github,
   ArrowRight, ChevronDown, ChevronUp, Lock, Layers, Zap, Link2,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
+import PanelDeploys from '../components/PanelDeploys'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 // Edgetunnel config uses Chinese keys — we map them to a typed interface
@@ -179,15 +180,35 @@ function Sect({ title, icon, children }: { title: string; icon: React.ReactNode;
 }
 
 // ── Main page ─────────────────────────────────────────────────────────────
+type DeployTab = 'workers' | 'panels' | 'scanner'
+
+/** Tabs shown above the page (the dedicated panel sits next to the workers). */
+const DEPLOY_TABS: Array<{ key: DeployTab; label: string }> = [
+  { key: 'workers', label: 'ورکرها' },
+  { key: 'panels', label: 'پنل اختصاصی' },
+  { key: 'scanner', label: 'اسکنر IP' },
+]
+
 export default function Deployments() {
-  const [tab, setTab] = useState<'workers' | 'scanner'>('workers')
+  // `?tab=panels` deep-links the dedicated panel (dashboard cards link there).
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requested = searchParams.get('tab')
+  const tab: DeployTab = requested === 'panels' || requested === 'scanner' ? requested : 'workers'
+  const selectTab = (next: DeployTab) => {
+    const params = new URLSearchParams(searchParams)
+    if (next === 'workers') params.delete('tab')
+    else params.set('tab', next)
+    setSearchParams(params, { replace: true })
+  }
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-white">ورکرها</h1>
-          <p className="text-slate-400 text-sm mt-1">مدیریت کامل ورکرها، تنظیمات زنده و اسکنر IP</p>
+          <h1 className="text-2xl font-bold text-white">ورکرها و پنل</h1>
+          <p className="text-slate-400 text-sm mt-1">
+            مدیریت کامل ورکرهای کلودفلر، پنل اختصاصی روی Railway/Render، تنظیمات زنده و اسکنر IP
+          </p>
         </div>
         <Link to="/deploy" className="btn-primary flex items-center gap-2">
           <Rocket className="w-4 h-4" /> استقرار جدید
@@ -195,18 +216,16 @@ export default function Deployments() {
       </div>
 
       <div className="flex items-center gap-1 bg-slate-800/50 rounded-xl p-1 border border-slate-700/50 w-fit">
-        {[
-          { key: 'workers', label: 'ورکرها', icon: <Server className="w-4 h-4" /> },
-          { key: 'scanner', label: 'اسکنر IP', icon: <Radar className="w-4 h-4" /> },
-        ].map((t) => (
-          <button key={t.key} onClick={() => setTab(t.key as typeof tab)}
+        {DEPLOY_TABS.map((t) => (
+          <button key={t.key} onClick={() => selectTab(t.key)}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${tab === t.key ? 'bg-brand-500/20 text-brand-300' : 'text-slate-400 hover:text-white'}`}>
-            {t.icon}{t.label}
+            {t.key === 'workers' ? <Server className="w-4 h-4" /> : t.key === 'panels' ? <Cloud className="w-4 h-4" /> : <Radar className="w-4 h-4" />}
+            {t.label}
           </button>
         ))}
       </div>
 
-      {tab === 'workers' ? <WorkersTab /> : <ScannerTab />}
+      {tab === 'workers' ? <WorkersTab /> : tab === 'panels' ? <PanelDeploys variant="full" /> : <ScannerTab />}
     </div>
   )
 }

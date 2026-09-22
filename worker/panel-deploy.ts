@@ -243,6 +243,155 @@ async function activeToken(env: Env, userId: string, tokenId: string, platform: 
   return row?.token ?? null
 }
 
+/**
+ * One row of the user's hosted-panel registry, ready for the UI/API.
+ * Flattens the platform-specific tables and the catalog spec into one shape so
+ * the dashboard, the deployments page and the bot all render the same thing.
+ */
+export interface PanelDeployRow {
+  platform: PanelPlatform
+  /** `railway_deploys.id` / `render_deploys.id` — the deployment id. */
+  id: string
+  name: string | null
+  /** Catalog panel id + display name. */
+  panel: string
+  panelName: string
+  panelPath: string
+  healthPath: string
+  /** Public host (Railway) — Render only stores the full URL. */
+  domain: string | null
+  /** Live base URL, e.g. `https://app.up.railway.app`. */
+  url: string | null
+  /** Direct link into the panel dashboard. */
+  panelUrl: string | null
+  adminUsername: string | null
+  adminPassword: string | null
+  setupDone: boolean
+  dashboardUrl: string | null
+  createdAt: string | null
+}
+
+/** Every panel this user has deployed on Railway/Render, newest first. */
+export async function listPanelDeploys(env: Env, userId: string): Promise<PanelDeployRow[]> {
+  const rail = await env.DB.prepare(
+    'SELECT id, name, panel, domain, project_id, admin_username, admin_password, setup_done, created_at FROM railway_deploys WHERE user_id = ?',
+  ).bind(userId).all<{
+    id: string; name: string | null; panel: string | null; domain: string | null; project_id: string
+    admin_username: string | null; admin_password: string | null; setup_done: number; created_at: string | null
+  }>()
+  const render = await env.DB.prepare(
+    'SELECT id, name, panel, url, service_id, admin_username, admin_password, setup_done, created_at FROM render_deploys WHERE user_id = ?',
+  ).bind(userId).all<{
+    id: string; name: string | null; panel: string | null; url: string | null; service_id: string
+    admin_username: string | null; admin_password: string | null; setup_done: number; created_at: string | null
+  }>()
+
+  const rows: PanelDeployRow[] = []
+  for (const r of rail.results ?? []) {
+    const spec = resolvePanel(r.panel)
+    const url = r.domain ? `https://${r.domain}` : null
+    rows.push({
+      platform: 'railway',
+      id: r.id,
+      name: r.name,
+      panel: spec.id,
+      panelName: spec.name,
+      panelPath: spec.panelPath,
+      healthPath: spec.healthPath ?? spec.panelPath,
+      domain: r.domain,
+      url,
+      panelUrl: url ? `${url}${spec.panelPath}` : null,
+      adminUsername: r.admin_username,
+      adminPassword: r.admin_password,
+      setupDone: !!r.setup_done,
+      dashboardUrl: r.project_id ? `https://railway.com/project/${r.project_id}` : null,
+      createdAt: r.created_at,
+    })
+  }
+  for (const r of render.results ?? []) {
+    const spec = resolvePanel(r.panel)
+    rows.push({
+      platform: 'render',
+      id: r.id,
+      name: r.name,
+      panel: spec.id,
+      panelName: spec.name,
+      panelPath: spec.panelPath,
+      healthPath: spec.healthPath ?? spec.panelPath,
+      domain: r.url ? r.url.replace(/^https?:\/\//, '') : null,
+      url: r.url,
+      panelUrl: r.url ? `${r.url}${spec.panelPath}` : null,
+      adminUsername: r.admin_username,
+      adminPassword: r.admin_password,
+      setupDone: !!r.setup_done,
+      dashboardUrl: `https://dashboard.render.com/web/${r.service_id}`,
+      createdAt: r.created_at,
+    })
+  }
+  return rows.sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
+}
+
+/**
+ * Drop one panel record from the panel's own registry.
+ *
+ * This only forgets the deployment inside miliconfig — the service keeps
+ * running on Railway/Render, so the user can still delete it there (the card
+ * links to the platform dashboard). Removing it from the platform too would
+ * need the token and is deliberately left to the dashboard.
+ */
+export async function forgetPanelDeploy(
+  env: Env,
+  userId: string,
+  platform: PanelPlatform,
+  id: string,
+): Promise<{ ok: true; name: string | null } | { ok: false; error: string }> {
+  const table = platform === 'railway' ? 'railway_deploys' : 'render_deploys'
+  const row = await env.DB.prepare(`DELETE FROM ${table} WHERE id = ? AND user_id = ? RETURNING name`)
+    .bind(id, userId)
+    .first<{ name: string | null }>()
+  if (!row) return { ok: false, error: 'این پنل در فهرست شما نیست' }
+  await env.DB.prepare('INSERT INTO activity_logs (id, user_id, action, entity_type, entity_name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(genId(), userId, 'panel_forgotten', 'deployment', row.name ?? id, nowIso())
+    .run()
+  return { ok: true, name: row.name }
+}
+
+/**
+ * Health-probe one of the user's panels from the edge.
+ *
+ * The URL always comes from our own record (never from the request), so this
+ * cannot be used to make the worker fetch arbitrary hosts.
+ */
+export async function probePanelHealth(
+  env: Env,
+  userId: string,
+  platform: PanelPlatform,
+  id: string,
+): Promise<{ ok: boolean; status: number | null; ms: number; url: string | null; error?: string }> {
+  const deploys = await listPanelDeploys(env, userId)
+  const target = deploys.find((d) => d.platform === platform && d.id === id)
+  if (!target) return { ok: false, status: null, ms: 0, url: null, error: 'این پنل در فهرست شما نیست' }
+  if (!target.url) return { ok: false, status: null, ms: 0, url: null, error: 'آدرس عمومی این پنل هنوز ساخته نشده' }
+
+  const started = Date.now()
+  try {
+    const resp = await fetch(`${target.url}${target.healthPath}`, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(10000),
+    })
+    return { ok: resp.ok, status: resp.status, ms: Date.now() - started, url: target.url }
+  } catch (err) {
+    return {
+      ok: false,
+      status: null,
+      ms: Date.now() - started,
+      url: target.url,
+      error: err instanceof Error ? err.message.slice(0, 160) : 'پاسخی دریافت نشد',
+    }
+  }
+}
+
 /** POST the one-time admin credentials to the panel's setup endpoint (if any). */
 async function bootstrapPanelAdmin(setupUrl: string, username: string, password: string): Promise<void> {
   // Brief retry loop — DNS/proxy warm-up right after the deploy goes live.

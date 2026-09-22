@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
-import { Users, Plus, Copy, Check, Trash2, Loader2, RefreshCw, Power, Activity, Zap, Pencil, X, FlaskConical, Download } from 'lucide-react'
+import { Users, Plus, Copy, Check, Trash2, Loader2, RefreshCw, Power, Activity, Zap, Pencil, X, FlaskConical, Download, Cloud } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { FRAGMENT_PRESETS, FM_PRESETS, CS_PRESETS, KNOWN_SNIS, CLIENT_FRAGMENT_PRESETS, CHAIN_PROTOCOLS } from '../../worker/presets'
 import type { Deployment, WorkerMember } from '../lib/types'
@@ -533,6 +534,24 @@ export default function Members() {
         <p className="text-sm text-slate-400">
           حداکثر {MAX_NODES_PER_LOCATION} نود بهینه در هر لوکیشن · پروکسی از EDT-Pages · فرگمنت در sing-box JSON
         </p>
+      </div>
+
+      {/* Members here belong to Cloudflare workers; the dedicated panel keeps
+          its own users, so point straight at it instead of duplicating them. */}
+      <div className="glass-card p-5 flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex items-start gap-3 min-w-0">
+          <img src="/icon.svg" alt="" aria-hidden="true" className="w-10 h-10 rounded-xl border border-brand-300/35 shrink-0" />
+          <div className="min-w-0">
+            <p className="eyebrow">OUR OWN PANEL</p>
+            <h3 className="text-sm font-bold text-white">کاربران پنل اختصاصی جداگانه مدیریت می‌شوند</h3>
+            <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+              این صفحه کاربران <b>ورکرهای کلودفلر</b> است. کاربران پنل اختصاصی داخل خودِ پنل ساخته می‌شوند؛ از فهرست پنل‌ها وارد پنل شوید و از آنجا کاربر اضافه کنید.
+            </p>
+          </div>
+        </div>
+        <Link to="/deployments?tab=panels" className="btn-secondary text-sm flex items-center gap-2">
+          <Cloud className="w-4 h-4" /> مدیریت پنل اختصاصی
+        </Link>
       </div>
 
       <div className="glass-card p-6 space-y-4">

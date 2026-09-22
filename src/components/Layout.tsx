@@ -27,7 +27,7 @@ const baseNavItems: NavItem[] = [
   { to: '/', label: 'داشبورد', icon: LayoutDashboard, end: true, guide: 'nav-dashboard' },
   { to: '/tokens', label: 'توکن‌ها', icon: KeyRound, guide: 'nav-tokens' },
   { to: '/deploy', label: 'استقرار جدید', icon: UserPlus, guide: 'nav-deploy' },
-  { to: '/deployments', label: 'ورکرها', icon: Cloud, guide: 'nav-deployments' },
+  { to: '/deployments', label: 'ورکرها و پنل', icon: Cloud, guide: 'nav-deployments' },
   { to: '/optimizer', label: 'بهینه‌ساز', icon: Zap, guide: 'nav-optimizer' },
   { to: '/members', label: 'کاربران ورکر', icon: UsersRound, guide: 'nav-members' },
   { to: '/bot-config', label: 'ربات تلگرام', icon: Bot, guide: 'nav-bot-config' },
