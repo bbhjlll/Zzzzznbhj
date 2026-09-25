@@ -59,6 +59,9 @@ const SCHEMA_STATEMENTS = [
     admin_username TEXT,
     admin_password TEXT,
     setup_done INTEGER NOT NULL DEFAULT 0,
+    auto_update INTEGER NOT NULL DEFAULT 0,
+    last_version TEXT,
+    last_updated_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE TABLE IF NOT EXISTS render_deploys (
@@ -72,6 +75,9 @@ const SCHEMA_STATEMENTS = [
     admin_username TEXT,
     admin_password TEXT,
     setup_done INTEGER NOT NULL DEFAULT 0,
+    auto_update INTEGER NOT NULL DEFAULT 0,
+    last_version TEXT,
+    last_updated_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE TABLE IF NOT EXISTS deployments (
@@ -257,6 +263,15 @@ const MIGRATIONS = [
   `ALTER TABLE optimizer_jobs ADD COLUMN opt_options TEXT`,
   `ALTER TABLE railway_deploys ADD COLUMN panel TEXT`,
   `ALTER TABLE railway_deploys ADD COLUMN name TEXT`,
+  // Latest-version tracking for the dedicated panel (see panel-deploy.ts):
+  // `auto_update` opts a deployment into the scheduled sweep and `last_version`
+  // remembers the upstream revision it was last updated to.
+  `ALTER TABLE railway_deploys ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE railway_deploys ADD COLUMN last_version TEXT`,
+  `ALTER TABLE railway_deploys ADD COLUMN last_updated_at TEXT`,
+  `ALTER TABLE render_deploys ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE render_deploys ADD COLUMN last_version TEXT`,
+  `ALTER TABLE render_deploys ADD COLUMN last_updated_at TEXT`,
 ]
 
 let ready: Promise<void> | null = null

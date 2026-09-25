@@ -9,9 +9,9 @@
 
 import type { Env } from './env'
 import { genId, nowIso } from './util'
-import { resolvePanel, type PanelSpec } from '../shared/panels'
-import { deployToRailway, RailwayApiError, railwayDeployStatus } from './railway'
-import { deployToRender, RenderApiError, renderDeployStatus } from './render'
+import { panelBranch, resolvePanel, type PanelSpec } from '../shared/panels'
+import { deployToRailway, RailwayApiError, railwayDeployStatus, railwayRedeploy } from './railway'
+import { deployToRender, RenderApiError, renderDeployStatus, renderRedeploy } from './render'
 import { notifyDeployment } from './telegram-core'
 
 export type PanelPlatform = 'railway' | 'render'
@@ -269,21 +269,29 @@ export interface PanelDeployRow {
   setupDone: boolean
   dashboardUrl: string | null
   createdAt: string | null
+  /** Deployment opted into the scheduled "always latest version" sweep. */
+  autoUpdate: boolean
+  /** Upstream revision the last update pointed this deployment at. */
+  lastVersion: string | null
+  /** When the last update/redeploy was triggered (ISO), null if never. */
+  lastUpdatedAt: string | null
 }
 
 /** Every panel this user has deployed on Railway/Render, newest first. */
 export async function listPanelDeploys(env: Env, userId: string): Promise<PanelDeployRow[]> {
   const rail = await env.DB.prepare(
-    'SELECT id, name, panel, domain, project_id, admin_username, admin_password, setup_done, created_at FROM railway_deploys WHERE user_id = ?',
+    'SELECT id, name, panel, domain, project_id, admin_username, admin_password, setup_done, created_at, auto_update, last_version, last_updated_at FROM railway_deploys WHERE user_id = ?',
   ).bind(userId).all<{
     id: string; name: string | null; panel: string | null; domain: string | null; project_id: string
     admin_username: string | null; admin_password: string | null; setup_done: number; created_at: string | null
+    auto_update: number | null; last_version: string | null; last_updated_at: string | null
   }>()
   const render = await env.DB.prepare(
-    'SELECT id, name, panel, url, service_id, admin_username, admin_password, setup_done, created_at FROM render_deploys WHERE user_id = ?',
+    'SELECT id, name, panel, url, service_id, admin_username, admin_password, setup_done, created_at, auto_update, last_version, last_updated_at FROM render_deploys WHERE user_id = ?',
   ).bind(userId).all<{
     id: string; name: string | null; panel: string | null; url: string | null; service_id: string
     admin_username: string | null; admin_password: string | null; setup_done: number; created_at: string | null
+    auto_update: number | null; last_version: string | null; last_updated_at: string | null
   }>()
 
   const rows: PanelDeployRow[] = []
@@ -306,6 +314,9 @@ export async function listPanelDeploys(env: Env, userId: string): Promise<PanelD
       setupDone: !!r.setup_done,
       dashboardUrl: r.project_id ? `https://railway.com/project/${r.project_id}` : null,
       createdAt: r.created_at,
+      autoUpdate: !!r.auto_update,
+      lastVersion: r.last_version,
+      lastUpdatedAt: r.last_updated_at,
     })
   }
   for (const r of render.results ?? []) {
@@ -326,6 +337,9 @@ export async function listPanelDeploys(env: Env, userId: string): Promise<PanelD
       setupDone: !!r.setup_done,
       dashboardUrl: `https://dashboard.render.com/web/${r.service_id}`,
       createdAt: r.created_at,
+      autoUpdate: !!r.auto_update,
+      lastVersion: r.last_version,
+      lastUpdatedAt: r.last_updated_at,
     })
   }
   return rows.sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
@@ -354,6 +368,266 @@ export async function forgetPanelDeploy(
     .bind(genId(), userId, 'panel_forgotten', 'deployment', row.name ?? id, nowIso())
     .run()
   return { ok: true, name: row.name }
+}
+
+// ── Latest version: keep every deployment on the newest upstream release ──────
+
+/** Newest upstream commit of a catalog panel's tracked branch. */
+export interface PanelUpstreamVersion {
+  /** Full commit sha — what `last_version` stores. */
+  sha: string
+  /** Abbreviated sha for display. */
+  short: string
+  /** Commit date (ISO), when GitHub reported one. */
+  date: string | null
+  /** First line of the commit message. */
+  message: string | null
+  /** Permalink to the commit. */
+  url: string
+}
+
+/** How long a fetched upstream revision is reused (GitHub rate-limits callers). */
+const VERSION_CACHE_SECONDS = 600
+
+/**
+ * The Workers Cache API, when available.
+ *
+ * Read through a guard so the same module also runs in plain Node (the smoke
+ * tests import it directly), where `caches` does not exist.
+ */
+function versionCache(): Cache | null {
+  try {
+    if (typeof caches === 'undefined') return null
+    return (caches as unknown as { default?: Cache }).default ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Newest commit on a panel's tracked branch, straight from GitHub.
+ *
+ * The panels page ("آخرین نسخه" badge) and the auto-update sweep both read
+ * this, so the answer is memoised in the Workers Cache for a few minutes: a
+ * Worker shares its egress IP with other tenants and unauthenticated GitHub
+ * calls are rate limited per IP.
+ */
+export async function fetchLatestPanelVersion(panel: PanelSpec): Promise<PanelUpstreamVersion | null> {
+  const branch = panelBranch(panel)
+  const cache = versionCache()
+  const cacheKey = new Request(`https://panel-version.miliconfig/${panel.repo}@${encodeURIComponent(branch)}`)
+
+  if (cache) {
+    try {
+      const hit = await cache.match(cacheKey)
+      if (hit) return (await hit.json()) as PanelUpstreamVersion
+    } catch {
+      /* a cache problem must never break the page */
+    }
+  }
+
+  let version: PanelUpstreamVersion | null = null
+  try {
+    const resp = await fetch(
+      `https://api.github.com/repos/${panel.repo}/commits?sha=${encodeURIComponent(branch)}&per_page=1`,
+      {
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'miliconfigpro-panel' },
+        signal: AbortSignal.timeout(8000),
+      },
+    )
+    if (resp.ok) {
+      const list = (await resp.json()) as Array<{
+        sha?: string
+        html_url?: string
+        commit?: { message?: string; committer?: { date?: string } }
+      }>
+      const head = list?.[0]
+      if (head?.sha) {
+        version = {
+          sha: head.sha,
+          short: head.sha.slice(0, 7),
+          date: head.commit?.committer?.date ?? null,
+          message: (head.commit?.message ?? '').split('\n')[0] || null,
+          url: head.html_url ?? `https://github.com/${panel.repo}/commit/${head.sha}`,
+        }
+      }
+    }
+  } catch {
+    /* offline or rate limited → the caller simply shows no version hint */
+  }
+
+  if (version && cache) {
+    try {
+      await cache.put(
+        cacheKey,
+        new Response(JSON.stringify(version), {
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${VERSION_CACHE_SECONDS}` },
+        }),
+      )
+    } catch {
+      /* storing the hint is best-effort */
+    }
+  }
+  return version
+}
+
+interface PanelUpdateRecord {
+  name: string | null
+  panel: string | null
+  token_id: string
+  service_id: string
+  environment_id: string | null
+  last_version: string | null
+}
+
+export type PanelUpdateResult =
+  | {
+      ok: true
+      platform: PanelPlatform
+      /** Row id after the update — it tracks the deployment that was just started. */
+      id: string
+      /** Latest upstream revision this deployment is now building. */
+      version: PanelUpstreamVersion | null
+      /** True when the deployment was already on the newest revision. */
+      alreadyLatest: boolean
+    }
+  | { ok: false; error: string }
+
+/**
+ * Point one owned deployment at the newest upstream revision and rebuild it.
+ *
+ * This is the in-place update behind "بروزرسانی به آخرین نسخه": the platform
+ * re-builds the tracked branch of the *existing* service, so the project, its
+ * persistent volume/disk and the generated admin credentials all survive — only
+ * the panel code moves forward. The row id then moves to the deployment that
+ * was just started, because everywhere in this module the row id *is* the
+ * platform deployment id (that is how `watchPanelDeploy` follows it).
+ */
+export async function updatePanelDeploy(
+  env: Env,
+  userId: string,
+  platform: PanelPlatform,
+  id: string,
+): Promise<PanelUpdateResult> {
+  const rec = platform === 'railway'
+    ? await env.DB.prepare(
+        'SELECT name, panel, token_id, service_id, environment_id, last_version FROM railway_deploys WHERE id = ? AND user_id = ?',
+      ).bind(id, userId).first<PanelUpdateRecord>()
+    : await env.DB.prepare(
+        'SELECT name, panel, token_id, service_id, NULL AS environment_id, last_version FROM render_deploys WHERE id = ? AND user_id = ?',
+      ).bind(id, userId).first<PanelUpdateRecord>()
+  if (!rec) return { ok: false, error: 'این پنل در فهرست شما نیست' }
+
+  const token = await activeToken(env, userId, rec.token_id, platform)
+  if (!token) return { ok: false, error: 'توکن فعال این استقرار پیدا نشد — ابتدا یک توکن تازه اضافه کنید' }
+
+  const panel = resolvePanel(rec.panel)
+  const version = await fetchLatestPanelVersion(panel)
+  const alreadyLatest = Boolean(version && rec.last_version === version.sha)
+
+  try {
+    let newDeployId: string
+    if (platform === 'railway') {
+      if (!rec.environment_id) return { ok: false, error: 'اطلاعات محیط این استقرار کامل نیست — یک استقرار تازه بسازید' }
+      newDeployId = await railwayRedeploy(token, rec.service_id, rec.environment_id)
+    } else {
+      newDeployId = await renderRedeploy(token, rec.service_id)
+    }
+
+    const at = nowIso()
+    const table = platform === 'railway' ? 'railway_deploys' : 'render_deploys'
+    await env.DB.prepare(
+      `UPDATE ${table} SET id = ?, last_version = ?, last_updated_at = ? WHERE id = ? AND user_id = ?`,
+    ).bind(newDeployId, version?.sha ?? null, at, id, userId).run()
+    await env.DB.prepare('INSERT INTO activity_logs (id, user_id, action, entity_type, entity_name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(genId(), userId, 'panel_updated', 'deployment', rec.name ?? panel.name, at)
+      .run()
+
+    return { ok: true, platform, id: newDeployId, version, alreadyLatest }
+  } catch (err) {
+    const msg =
+      err instanceof RailwayApiError || err instanceof RenderApiError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : 'بروزرسانی پنل ناموفق بود'
+    return { ok: false, error: msg }
+  }
+}
+
+/**
+ * Opt one owned deployment in or out of the scheduled "always latest" sweep.
+ * The flag itself lives on the deployment row; the sweep (see
+ * {@link autoUpdatePanels}) is what actually rebuilds it.
+ */
+export async function setPanelAutoUpdate(
+  env: Env,
+  userId: string,
+  platform: PanelPlatform,
+  id: string,
+  enabled: boolean,
+): Promise<{ ok: true; autoUpdate: boolean } | { ok: false; error: string }> {
+  const table = platform === 'railway' ? 'railway_deploys' : 'render_deploys'
+  const owned = await env.DB.prepare(`SELECT name FROM ${table} WHERE id = ? AND user_id = ?`)
+    .bind(id, userId)
+    .first<{ name: string | null }>()
+  if (!owned) return { ok: false, error: 'این پنل در فهرست شما نیست' }
+
+  await env.DB.prepare(`UPDATE ${table} SET auto_update = ? WHERE id = ? AND user_id = ?`)
+    .bind(enabled ? 1 : 0, id, userId)
+    .run()
+  await env.DB.prepare('INSERT INTO activity_logs (id, user_id, action, entity_type, entity_name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(genId(), userId, enabled ? 'panel_auto_update_on' : 'panel_auto_update_off', 'deployment', owned.name ?? id, nowIso())
+    .run()
+  return { ok: true, autoUpdate: enabled }
+}
+
+export interface PanelAutoUpdateSummary {
+  /** Deployments that opted in and were looked at. */
+  checked: number
+  /** Deployments that were behind upstream and got rebuilt. */
+  updated: number
+  /** Updates that failed (bad/expired token, platform error). */
+  failed: number
+}
+
+/**
+ * Scheduled sweep: rebuild every deployment that opted into auto-update when its
+ * recorded revision is behind the upstream branch.
+ *
+ * "Always on the latest version" cannot depend on somebody opening the panel,
+ * so the cron collector calls this. It is deliberately conservative: an unknown
+ * upstream (offline, rate limited) leaves the deployment untouched, and a
+ * deployment already at the newest sha costs nothing but a cached lookup.
+ */
+export async function autoUpdatePanels(env: Env): Promise<PanelAutoUpdateSummary> {
+  const summary: PanelAutoUpdateSummary = { checked: 0, updated: 0, failed: 0 }
+  const rows = [...(await autoUpdateCandidates(env, 'railway')), ...(await autoUpdateCandidates(env, 'render'))]
+  const versions = new Map<string, PanelUpstreamVersion | null>()
+
+  for (const row of rows) {
+    summary.checked++
+    const panel = resolvePanel(row.panel)
+    if (!versions.has(panel.id)) versions.set(panel.id, await fetchLatestPanelVersion(panel))
+    const latest = versions.get(panel.id) ?? null
+    if (!latest || latest.sha === row.last_version) continue
+
+    const result = await updatePanelDeploy(env, row.user_id, row.platform, row.id)
+    if (result.ok) summary.updated++
+    else summary.failed++
+  }
+  return summary
+}
+
+/** Deployments of one platform that asked to be kept on the latest version. */
+async function autoUpdateCandidates(
+  env: Env,
+  platform: PanelPlatform,
+): Promise<Array<{ platform: PanelPlatform; id: string; user_id: string; panel: string | null; last_version: string | null }>> {
+  const table = platform === 'railway' ? 'railway_deploys' : 'render_deploys'
+  const rows = await env.DB.prepare(`SELECT id, user_id, panel, last_version FROM ${table} WHERE auto_update = 1`)
+    .all<{ id: string; user_id: string; panel: string | null; last_version: string | null }>()
+  return (rows.results ?? []).map((r) => ({ ...r, platform }))
 }
 
 /**

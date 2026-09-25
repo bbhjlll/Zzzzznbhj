@@ -4,7 +4,17 @@ import { handleSignup, handleLogin, handleLogout, handleMe, isOwner } from './au
 import { startDeployment } from './deploy'
 import { verifyRailwayToken, RailwayApiError } from './railway'
 import { verifyRenderToken, RenderApiError } from './render'
-import { startPanelDeploy, watchPanelDeploy, listPanelDeploys, forgetPanelDeploy, probePanelHealth } from './panel-deploy'
+import {
+  startPanelDeploy,
+  watchPanelDeploy,
+  listPanelDeploys,
+  forgetPanelDeploy,
+  probePanelHealth,
+  updatePanelDeploy,
+  setPanelAutoUpdate,
+  fetchLatestPanelVersion,
+  autoUpdatePanels,
+} from './panel-deploy'
 import { handleWorkerConfig } from './kvconfig'
 import { handleIpScanner, handleRangeScan } from './scanner'
 import { handleTelegramWebhook } from './telegram'
@@ -161,7 +171,12 @@ async function handleRailwayDeploy(env: Env, userId: string, request: Request): 
  */
 async function handlePanelList(env: Env, userId: string, origin: string): Promise<Response> {
   const panel = resolvePanel(undefined)
-  const deploys = await listPanelDeploys(env, userId)
+  // The upstream revision is a cached, best-effort hint (GitHub can be slow or
+  // rate limited), so it never blocks or fails the panel list itself.
+  const [deploys, latestVersion] = await Promise.all([
+    listPanelDeploys(env, userId),
+    fetchLatestPanelVersion(panel).catch(() => null),
+  ])
   return json({
     data: {
       panel: {
@@ -183,6 +198,7 @@ async function handlePanelList(env: Env, userId: string, origin: string): Promis
       },
       deploys,
       origin,
+      latestVersion,
     },
   })
 }
@@ -211,6 +227,30 @@ async function handlePanelForget(env: Env, userId: string, request: Request): Pr
   const forgotten = await forgetPanelDeploy(env, userId, platform, body.id)
   if (!forgotten.ok) return apiError(forgotten.error, 404)
   return json({ success: true })
+}
+
+/**
+ * Rebuild a hosted panel from the newest upstream commit — "بروزرسانی به آخرین
+ * نسخه". The panel keeps its domain, volume and admin credentials; only the
+ * code moves to the latest release.
+ */
+async function handlePanelUpdate(env: Env, userId: string, request: Request): Promise<Response> {
+  const body = safeJsonParse<{ platform?: string; id?: string }>(await request.text().catch(() => ''), {})
+  const platform = panelPlatformOf(body.platform)
+  if (!platform || !body.id) return apiError('پلتفرم و شناسهٔ استقرار الزامی است')
+  const updated = await updatePanelDeploy(env, userId, platform, body.id)
+  if (!updated.ok) return apiError(updated.error, 400)
+  return json({ data: updated })
+}
+
+/** Opt one hosted panel into (or out of) the scheduled latest-version sweep. */
+async function handlePanelAutoUpdate(env: Env, userId: string, request: Request): Promise<Response> {
+  const body = safeJsonParse<{ platform?: string; id?: string; enabled?: boolean }>(await request.text().catch(() => ''), {})
+  const platform = panelPlatformOf(body.platform)
+  if (!platform || !body.id) return apiError('پلتفرم و شناسهٔ استقرار الزامی است')
+  const result = await setPanelAutoUpdate(env, userId, platform, body.id, body.enabled !== false)
+  if (!result.ok) return apiError(result.error, 404)
+  return json({ data: result })
 }
 
 /** Narrow a request field to a supported deployment platform. */
@@ -727,6 +767,8 @@ async function handleRouted(
     if (path === '/api/panels' && method === 'GET') return await handlePanelList(env, user.id, origin)
     if (path === '/api/panels/watch' && method === 'POST') return await handlePanelWatch(env, user.id, request)
     if (path === '/api/panels/health' && method === 'POST') return await handlePanelHealth(env, user.id, request)
+    if (path === '/api/panels/update' && method === 'POST') return await handlePanelUpdate(env, user.id, request)
+    if (path === '/api/panels/auto-update' && method === 'POST') return await handlePanelAutoUpdate(env, user.id, request)
     if (path === '/api/panels/forget' && method === 'POST') return await handlePanelForget(env, user.id, request)
 
     if (path === '/api/deployments' && method === 'GET') return await listDeployments(env, user.id, url)
@@ -881,5 +923,28 @@ export default {
       console.error('API error:', err)
       return apiError(err instanceof Error ? err.message : 'خطای داخلی سرور', 500)
     }
+  },
+
+  /**
+   * Cron collector (see `[triggers]` in wrangler.toml): keep the deployments
+   * that opted in on the newest upstream version without waiting for someone to
+   * open the panel. Everything it does is also reachable from the UI, so a
+   * failure here costs nothing but a log line.
+   */
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (!env.DB) return
+    ctx.waitUntil(
+      (async () => {
+        try {
+          await ensureSchema(env)
+          const summary = await autoUpdatePanels(env)
+          if (summary.updated || summary.failed) {
+            console.log('panel auto-update:', JSON.stringify(summary))
+          }
+        } catch (err) {
+          console.error('panel auto-update failed:', err)
+        }
+      })(),
+    )
   },
 }
