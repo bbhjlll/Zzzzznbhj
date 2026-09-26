@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import PanelDeploys from '../components/PanelDeploys'
-import { api } from '../lib/api'
+import { api, downloadApi } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import {
   KeyRound,
@@ -48,7 +48,20 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [backupMsg, setBackupMsg] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const importFileRef = useRef<HTMLInputElement>(null)
+
+  const handleExport = async () => {
+    setExporting(true)
+    setBackupMsg(null)
+    try {
+      await downloadApi('/backup', `miliconfig-backup-${new Date().toISOString().slice(0, 10)}.json`)
+    } catch (e) {
+      setBackupMsg(`خطا در تهیه خروجی: ${e instanceof Error ? e.message : 'دانلود ناموفق بود'}`)
+    } finally {
+      setExporting(false)
+    }
+  }
 
   const handleImport = async (file: File) => {
     setImporting(true)
@@ -56,9 +69,9 @@ export default function Dashboard() {
     try {
       const text = await file.text()
       const parsed = JSON.parse(text)
-      const res = await api<{ members_added: number; members_skipped: number; injectors_added: number; injectors_skipped: number; groups_added: number; groups_skipped: number }>('/api/backup', {
+      const res = await api<{ members_added: number; members_skipped: number; injectors_added: number; injectors_skipped: number; groups_added: number; groups_skipped: number }>('/backup', {
         method: 'POST',
-        body: JSON.stringify({ ...parsed, mode: 'merge' }),
+        body: { ...parsed, mode: 'merge' },
       })
       setBackupMsg(`بازگردانی شد: ${res.members_added} عضو، ${res.injectors_added} ساب تزریقی، ${res.groups_added} گروه (${res.members_skipped + res.injectors_skipped + res.groups_skipped} تکراری رد شد)`)
     } catch (e) {
@@ -147,10 +160,10 @@ export default function Dashboard() {
             {backupMsg && <p className="text-xs text-brand-300 mt-2">{backupMsg}</p>}
           </div>
           <div className="flex items-center gap-2">
-            <a href="/api/backup" download
+            <button onClick={() => void handleExport()} disabled={exporting}
               className="btn-secondary flex items-center gap-2 text-sm px-3 py-1.5">
-              <Download className="w-4 h-4" /> خروجی JSON
-            </a>
+              {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />} خروجی JSON
+            </button>
             <button onClick={() => importFileRef.current?.click()} disabled={importing}
               className="btn-primary flex items-center gap-2 text-sm px-3 py-1.5">
               {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />} بازگردانی

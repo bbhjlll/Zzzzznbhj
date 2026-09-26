@@ -115,6 +115,19 @@ function cleanParam(v: unknown, max = 400): string {
   return typeof v === 'string' ? v.trim().slice(0, max) : ''
 }
 
+/**
+ * Accept a real date only. An unparsable value must never reach the database:
+ * a member with `expires_at = 'abc'` compares as expired forever and would be
+ * locked out of its own sub link on the first fetch.
+ */
+function normalizeExpiry(v: unknown): { ok: true; value: string | null } | { ok: false } {
+  if (v == null || v === '') return { ok: true, value: null }
+  if (typeof v !== 'string') return { ok: false }
+  const parsed = Date.parse(v.length === 10 ? `${v}T23:59:59Z` : v)
+  if (Number.isNaN(parsed)) return { ok: false }
+  return { ok: true, value: new Date(parsed).toISOString() }
+}
+
 function sanitizeSettings(s?: Partial<MemberSettings>): MemberSettings {
   const countries = (s?.countries ?? []).filter((c) => /^[a-z]{2}$|^(multi)$/.test(c)).slice(0, 8)
   const customIps = (s?.custom_ips ?? []).filter((ip) => /^(\d{1,3}(\.\d{1,3}){3}|[a-z0-9.-]+\.[a-z]{2,})$/i.test(ip)).slice(0, 20)
@@ -196,22 +209,109 @@ export async function handleMemberCreate(env: Env, userId: string, request: Requ
   ).bind(body.deployment_id, userId).first<{ id: string; name: string }>()
   if (!dep) return apiError('ورکر پیدا نشد', 404)
 
-  const settings = sanitizeSettings(body)
+  const expiry = normalizeExpiry(body.expires_at)
+  if (!expiry.ok) return apiError('تاریخ انقضا نامعتبر است')
+  const already = await countMembers(env, userId, dep.id)
+  if (already >= MAX_MEMBERS_PER_WORKER) {
+    return apiError(`سقف ${MAX_MEMBERS_PER_WORKER} کاربر برای این ورکر پر شده است`)
+  }
+
+  const created = await insertMember(env, {
+    userId, deploymentId: dep.id,
+    name: body.name?.trim() || `کاربر ${dep.name}`,
+    settings: sanitizeSettings(body),
+    expiresAt: expiry.value,
+    ...memberQuotas(body),
+    startOnConnect: !!body.start_on_connect,
+  })
+  return json({ data: created }, 201)
+}
+
+/** Ceiling that keeps one worker shareable at scale while stopping a single
+ *  account from filling the database. */
+const MAX_MEMBERS_PER_WORKER = 500
+
+async function countMembers(env: Env, userId: string, deploymentId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) AS c FROM worker_members WHERE owner_user_id = ? AND deployment_id = ?',
+  ).bind(userId, deploymentId).first<{ c: number }>()
+  return row?.c ?? 0
+}
+
+/** Normalise the optional quotas shared by every create path. */
+function memberQuotas(body: MemberBody) {
+  return {
+    quotaBytes: body.quota_gb == null || body.quota_gb <= 0 ? null : Math.round(body.quota_gb * 1024 ** 3),
+    reqQuota: body.request_quota == null || body.request_quota <= 0 ? null : Math.round(body.request_quota),
+    ipLimit: body.ip_limit == null || body.ip_limit <= 0 ? null : Math.round(body.ip_limit),
+    resetDays: body.reset_period_days == null || body.reset_period_days <= 0 ? null : Math.round(body.reset_period_days),
+  }
+}
+
+interface InsertMemberInput {
+  userId: string
+  deploymentId: string
+  name: string
+  settings: MemberSettings
+  expiresAt: string | null
+  quotaBytes: number | null
+  reqQuota: number | null
+  ipLimit: number | null
+  resetDays: number | null
+  startOnConnect: boolean
+}
+
+/** Insert one member row and return its id + private sub token. */
+async function insertMember(env: Env, input: InsertMemberInput): Promise<{ id: string; token: string }> {
   const id = genId()
   const token = genId().replace(/-/g, '')
-  const quotaBytes = body.quota_gb == null || body.quota_gb <= 0 ? null : Math.round(body.quota_gb * 1024 ** 3)
-  const reqQuota = body.request_quota == null || body.request_quota <= 0 ? null : Math.round(body.request_quota)
-  const ipLimit = body.ip_limit == null || body.ip_limit <= 0 ? null : Math.round(body.ip_limit)
-  const resetDays = body.reset_period_days == null || body.reset_period_days <= 0 ? null : Math.round(body.reset_period_days)
   await env.DB.prepare(
     `INSERT INTO worker_members (id, owner_user_id, deployment_id, name, token, enabled, expires_at, quota_bytes, request_quota, ip_limit, used_bytes, used_requests, recent_ips, start_on_connect, reset_period_days, settings, created_at)
      VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, 0, '[]', ?, ?, ?, ?)`,
   ).bind(
-    id, userId, dep.id, body.name?.trim() || `کاربر ${dep.name}`,
-    token, body.expires_at ?? null, quotaBytes, reqQuota, ipLimit,
-    body.start_on_connect ? 1 : 0, resetDays, JSON.stringify(settings), nowIso(),
+    id, input.userId, input.deploymentId, input.name, token,
+    input.expiresAt, input.quotaBytes, input.reqQuota, input.ipLimit,
+    input.startOnConnect ? 1 : 0, input.resetDays, JSON.stringify(input.settings), nowIso(),
   ).run()
-  return json({ data: { id, token } }, 201)
+  return { id, token }
+}
+
+/** POST /api/members/create-many — create several members in one call. */
+export async function handleMemberCreateMany(env: Env, userId: string, request: Request): Promise<Response> {
+  const body = safeJsonParse<MemberBody & { count?: number; name_prefix?: string }>(
+    await request.text().catch(() => ''), {},
+  )
+  if (!body.deployment_id) return apiError('deployment_id الزامی است')
+  const dep = await env.DB.prepare(
+    'SELECT id, name FROM deployments WHERE id = ? AND user_id = ?',
+  ).bind(body.deployment_id, userId).first<{ id: string; name: string }>()
+  if (!dep) return apiError('ورکر پیدا نشد', 404)
+
+  const count = Math.min(Math.max(Math.round(Number(body.count) || 0), 1), 100)
+  const expiry = normalizeExpiry(body.expires_at)
+  if (!expiry.ok) return apiError('تاریخ انقضا نامعتبر است')
+  const already = await countMembers(env, userId, dep.id)
+  if (already + count > MAX_MEMBERS_PER_WORKER) {
+    return apiError(`با این تعداد از سقف ${MAX_MEMBERS_PER_WORKER} کاربر برای هر ورکر عبور می‌کنید (الان ${already} کاربر)`)
+  }
+
+  const settings = sanitizeSettings(body)
+  const quotas = memberQuotas(body)
+  const prefix = (body.name_prefix?.trim() || dep.name).slice(0, 40)
+  const startOnConnect = !!body.start_on_connect
+  const created: Array<{ id: string; token: string; name: string }> = []
+  for (let i = 1; i <= count; i++) {
+    const name = `${prefix} ${i}`
+    const row = await insertMember(env, {
+      userId, deploymentId: dep.id, name, settings,
+      expiresAt: expiry.value, ...quotas, startOnConnect,
+    })
+    created.push({ ...row, name })
+  }
+  await env.DB.prepare('INSERT INTO activity_logs (id, user_id, action, entity_type, entity_name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(genId(), userId, 'members_created', 'member', `${count} × ${dep.name}`, nowIso())
+    .run()
+  return json({ data: created }, 201)
 }
 
 export async function handleMemberList(env: Env, userId: string, deploymentId: string | null): Promise<Response> {
@@ -271,7 +371,11 @@ export async function handleMemberPatch(env: Env, userId: string, id: string, re
     ip_rotation_minutes: body.ip_rotation_minutes !== undefined ? body.ip_rotation_minutes : prevSettings.ip_rotation_minutes,
   })
   const enabled = body.enabled !== undefined ? (body.enabled ? 1 : 0) : (existing.enabled as number)
-  const expiresAt = body.expires_at !== undefined ? body.expires_at : (existing.expires_at as string | null)
+  const expiry = body.expires_at !== undefined
+    ? normalizeExpiry(body.expires_at)
+    : { ok: true as const, value: existing.expires_at as string | null }
+  if (!expiry.ok) return apiError('تاریخ انقضا نامعتبر است')
+  const expiresAt = expiry.value
   const quotaBytes = body.quota_gb !== undefined
     ? (body.quota_gb == null || body.quota_gb <= 0 ? null : Math.round(body.quota_gb * 1024 ** 3))
     : (existing.quota_bytes as number | null)

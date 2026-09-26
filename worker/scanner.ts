@@ -1,11 +1,19 @@
 import { apiError, json } from './util'
 import { expandRanges, probeBatch } from './net'
+import { coloProbe, tcpProbe as tcpHandshake } from './probe'
 
 interface ScanResult {
   ip: string
   latencyMs: number | null
   status: 'ok' | 'timeout' | 'error'
+  /** Edge colo code (e.g. FRA) — only meaningful for Cloudflare IPs. */
   region?: string
+  /** Human-readable city for the colo, when known. */
+  city?: string
+  /** True when trace + CF-RAY independently agreed on the colo. */
+  verified?: boolean
+  /** HTTP round-trip time (ms) through the candidate IP, when measured. */
+  httpLatency?: number | null
   type: 'cloudflare' | 'clean' | 'proxy'
   source: string
   port?: number
@@ -19,23 +27,41 @@ const FALLBACK_CF_IPS = [
   '162.159.0.2', '1.1.1.1', '1.0.0.1',
 ]
 
+/**
+ * Probe one candidate IP for real.
+ *
+ * A cloudflare IP is verified by connecting to that exact IP while keeping a
+ * valid hostname for the TLS SNI/Host (`cf.resolveOverride`) — fetching
+ * `https://<ip>/cdn-cgi/trace` directly fails the certificate check, which is
+ * why the old scanner came back empty. The genuine trace body plus the CF-RAY
+ * header give the real, cross-verified colo.
+ *
+ * A "clean"/foreign IP is not a Cloudflare host, so the only honest signal is
+ * a real TCP handshake — the CF trace URL would never resolve there.
+ */
 async function probeIP(ip: string, type: 'cloudflare' | 'clean' | 'proxy', source: string, timeoutMs = 5000): Promise<ScanResult> {
-  const controller = new AbortController()
-  const tid = setTimeout(() => controller.abort(), timeoutMs)
-  const t0 = Date.now()
-  try {
-    const r = await fetch(`https://${ip}/cdn-cgi/trace`, {
-      signal: controller.signal,
-      headers: { Host: 'speed.cloudflare.com' },
-      redirect: 'manual',
-    })
-    clearTimeout(tid)
-    const text = await r.text().catch(() => '')
-    const coloMatch = text.match(/colo=([A-Z]{3})/)
-    return { ip, latencyMs: Date.now() - t0, status: 'ok', region: coloMatch ? coloMatch[1] : undefined, type, source }
-  } catch {
-    clearTimeout(tid)
-    return { ip, latencyMs: null, status: controller.signal.aborted ? 'timeout' : 'error', type, source }
+  if (type !== 'cloudflare') {
+    const tcp = await tcpHandshake(ip, 443, timeoutMs)
+    return {
+      ip,
+      latencyMs: tcp.latency,
+      status: tcp.status === 'ok' && tcp.latency !== null ? 'ok' : 'timeout',
+      type,
+      source,
+    }
+  }
+
+  const colo = await coloProbe(ip, timeoutMs)
+  return {
+    ip,
+    latencyMs: colo.latency,
+    status: colo.status === 'ok' && colo.latency !== null ? 'ok' : 'timeout',
+    region: colo.colo ?? undefined,
+    city: colo.city ?? undefined,
+    verified: !!colo.crossVerified,
+    httpLatency: colo.latency,
+    type,
+    source,
   }
 }
 
@@ -162,11 +188,17 @@ export async function handleRangeScan(body: {
     .slice(0, 5)
   if (!ports.length) return apiError('پورت معتبری وارد نشد')
 
-  const ips = expandRanges(ranges, 512)
+  const ips = expandRanges(ranges, 1024)
   if (!ips.length) return apiError('بازه IP معتبر نیست')
 
-  const targets = ips.flatMap((ip) => ports.map((port) => ({ host: ip, port, ip })))
-  const probed = await probeBatch(targets, 20, Math.min(Math.max(body.timeout ?? 2500, 500), 5000))
+  // Workers can only keep a handful of TCP sockets open per request, so an
+  // unbounded sweep (512 IPs × 5 ports) always ran past the client's 45s window
+  // and returned nothing. Bound the real work to a budget that reliably
+  // finishes, and report honestly how much of the range was covered.
+  const BUDGET = 240
+  const allTargets = ips.flatMap((ip) => ports.map((port) => ({ host: ip, port, ip })))
+  const targets = allTargets.slice(0, BUDGET)
+  const probed = await probeBatch(targets, 24, Math.min(Math.max(body.timeout ?? 2000, 500), 5000))
 
   const ok = probed
     .filter((p) => p.latencyMs !== null)
@@ -184,6 +216,8 @@ export async function handleRangeScan(body: {
   return json({
     success: ok.length > 0,
     scanned: targets.length,
+    total: allTargets.length,
+    truncated: allTargets.length > targets.length,
     count: ok.length,
     results: ok,
   })
@@ -223,10 +257,13 @@ export async function handleIpScanner(body: { type?: string; count?: number; inc
 
   if (unique.length === 0) return apiError('هیچ IP از منابع دریافت نشد.', 502)
 
-  // Probe in batches of 8 until we have enough good results.
+  // Probe in batches until we have enough good results, with a hard ceiling on
+  // total probes so a slow source can never burn the whole request budget.
+  const MAX_PROBES = 120
+  const BATCH = 12
   const allResults: ScanResult[] = []
-  for (let i = 0; i < unique.length && allResults.filter((r) => r.status === 'ok').length < safeCount; i += 8) {
-    const batch = unique.slice(i, i + 8)
+  for (let i = 0; i < unique.length && i < MAX_PROBES && allResults.filter((r) => r.status === 'ok').length < safeCount; i += BATCH) {
+    const batch = unique.slice(i, i + BATCH)
     allResults.push(...(await Promise.all(batch.map((c) => probeIP(c.ip, c.type, c.source)))))
   }
 
@@ -268,5 +305,5 @@ export async function handleIpScanner(body: { type?: string; count?: number; inc
     return json({ success: false, error: 'هیچ IP پاسخ‌دهی پیدا نشد. بعداً دوباره تلاش کنید.' }, 200)
   }
 
-  return json({ success: true, count: sorted.length, results: sorted, proxies: proxies.length > 0 ? proxies.slice(0, 50) : undefined })
+  return json({ success: true, count: sorted.length, scanned: allResults.length, results: sorted, proxies: proxies.length > 0 ? proxies.slice(0, 50) : undefined })
 }

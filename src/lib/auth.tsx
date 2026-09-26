@@ -43,6 +43,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false))
   }, [])
 
+  // When any authed request hits 401 the token is already cleared; drop the
+  // in-memory user too so the protected routes send the user back to /auth.
+  useEffect(() => {
+    const onExpired = () => setUser(null)
+    window.addEventListener('miliconfig:session-expired', onExpired)
+    return () => window.removeEventListener('miliconfig:session-expired', onExpired)
+  }, [])
+
   /**
    * Store a session and the authoritative user view for it.
    *

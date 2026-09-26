@@ -103,13 +103,19 @@ export default function Optimizer() {
     } catch { /* ignore */ }
   }, [])
 
+  // `jobs` is read through a ref, not a dependency: depending on the state
+  // array would re-run this effect on every `setJobs` (which always produces a
+  // fresh array), i.e. a runaway fetch loop against /api/optimizer.
+  const jobsRef = useRef(jobs)
+  useEffect(() => { jobsRef.current = jobs }, [jobs])
+
   useEffect(() => {
     load()
     const t = setInterval(() => {
-      if (jobs.some((j) => j.status === 'pending' || j.status === 'running')) load()
+      if (jobsRef.current.some((j) => j.status === 'pending' || j.status === 'running')) load()
     }, 3000)
     return () => clearInterval(t)
-  }, [load, jobs])
+  }, [load])
 
   const run = async () => {
     if (!input.trim()) { setError('لینک ساب یا کانفیگ‌ها را وارد کنید'); return }

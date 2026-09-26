@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
-import { Users, Plus, Copy, Check, Trash2, Loader2, RefreshCw, Power, Activity, Zap, Pencil, X, FlaskConical, Download, Cloud } from 'lucide-react'
+import { Users, Plus, Copy, Check, Trash2, Loader2, RefreshCw, Power, Activity, Zap, Pencil, X, FlaskConical, Download, Cloud, Layers } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { FRAGMENT_PRESETS, FM_PRESETS, CS_PRESETS, KNOWN_SNIS, CLIENT_FRAGMENT_PRESETS, CHAIN_PROTOCOLS } from '../../worker/presets'
@@ -304,6 +304,21 @@ function memberToForm(m: WorkerMember): FormState {
   }
 }
 
+/**
+ * The `fm=` fragment box is free-form JSON edited by hand. Invalid input must
+ * never take the page down while the user is still typing, so parse defensively
+ * and fall back to the preset (or empty) instead of throwing during render.
+ */
+function fragmentJson(fm: string): Record<string, unknown> {
+  if (!fm.trim()) return { packets: 'tlshello', length: '10-50', interval: '10-20' }
+  try {
+    const parsed = JSON.parse(fm)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
 function Field({ label, value, onChange, placeholder, type = 'text', textarea, rows = 2 }: {
   label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string; textarea?: boolean; rows?: number
 }) {
@@ -373,6 +388,10 @@ export default function Members() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [testResult, setTestResult] = useState<{ id: string; data: MemberTestResult } | null>(null)
   const [testingId, setTestingId] = useState<string | null>(null)
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkCount, setBulkCount] = useState('10')
+  const [bulkPrefix, setBulkPrefix] = useState('')
+  const [bulkBusy, setBulkBusy] = useState(false)
 
   const [proxyProtocol, setProxyProtocol] = useState<'socks5' | 'https'>('socks5')
   const [proxyLists, setProxyLists] = useState<Record<string, EtdProxy[]>>({})
@@ -432,6 +451,33 @@ export default function Members() {
       await load()
     } catch (e) { setError(e instanceof Error ? e.message : 'خطا') }
     setBusy(false)
+  }
+
+  /** Create several members at once and copy their sub links. */
+  const bulkCreate = async () => {
+    if (!depId) { setError('اول یک ورکر انتخاب کنید'); return }
+    const count = Math.max(1, Math.min(100, Number(bulkCount) || 1))
+    setBulkBusy(true); setError(null)
+    try {
+      const { data } = await api<{ data: Array<{ id: string; token: string; name: string }> }>('/members/create-many', {
+        method: 'POST',
+        body: { deployment_id: depId, count, name_prefix: bulkPrefix.trim() || undefined },
+      })
+      await load()
+      const links = (data ?? []).map((m) => `${m.name}\t${window.location.origin}/api/sub/member/${m.token}`)
+      await navigator.clipboard?.writeText(links.join('\n')).catch(() => null)
+      setError(`✅ ${data?.length ?? 0} کاربر ساخته شد و لینک‌های ساب‌شان در کلیپ‌بورد کپی شد`)
+      setTimeout(() => setError(null), 6000)
+      setBulkOpen(false)
+    } catch (e) { setError(e instanceof Error ? e.message : 'خطا در ساخت گروهی') }
+    setBulkBusy(false)
+  }
+
+  const copyAllLinks = async () => {
+    if (!members.length) return
+    const links = members.map((m) => `${m.name}\t${subUrl(m)}`).join('\n')
+    await navigator.clipboard?.writeText(links).catch(() => null)
+    setCopied('all-links'); setTimeout(() => setCopied(null), 2500)
   }
 
   const openEdit = (m: WorkerMember) => {
@@ -572,7 +618,38 @@ export default function Members() {
               <Plus className="w-4 h-4" /> کاربر پیشرفته
             </button>
           )}
+          {depId && (
+            <button onClick={() => setBulkOpen(!bulkOpen)}
+              className="btn-ghost text-sm px-3 py-2 flex items-center gap-1.5">
+              <Layers className="w-4 h-4" /> ساخت گروهی
+            </button>
+          )}
+          {depId && members.length > 0 && (
+            <button onClick={copyAllLinks} className="btn-ghost text-sm px-3 py-2 flex items-center gap-1.5">
+              {copied === 'all-links' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              کپی همهٔ لینک‌ها
+            </button>
+          )}
         </div>
+
+        {depId && bulkOpen && (
+          <div className="space-y-3 border border-brand-500/30 rounded-xl p-4 bg-brand-500/5">
+            <p className="text-sm font-medium text-white">ساخت گروهی کاربر</p>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              چند کاربر با تنظیمات پیشنهادی یکجا ساخته می‌شوند؛ لینک ساب همه بلافاصله در کلیپ‌بورد کپی می‌شود تا بین مشتری‌ها پخش کنید.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <Field label="تعداد" value={bulkCount} onChange={setBulkCount} placeholder="10" />
+              <Field label="پیشوند نام (اختیاری)" value={bulkPrefix} onChange={setBulkPrefix} placeholder="مشتری" />
+              <div className="flex items-end">
+                <button onClick={bulkCreate} disabled={bulkBusy} className="btn-primary text-sm flex items-center gap-2">
+                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Layers className="w-4 h-4" />}
+                  ساخت {bulkCount || '۱'} کاربر
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {depId && formOpen && (
           <div className="space-y-3 border border-slate-800 rounded-xl p-4 bg-slate-900/40">
@@ -783,7 +860,9 @@ export default function Members() {
               </div>
             </div>
 
-            {error && <p className="text-sm text-error-400">{error}</p>}
+            {error && (
+              <p className={`text-sm ${error.startsWith('✅') ? 'text-emerald-400' : 'text-error-400'}`}>{error}</p>
+            )}
 
             {/* Sing-box JSON preview */}
             {form.countries.length > 0 && (
@@ -805,7 +884,7 @@ export default function Members() {
         return entries.map((loc, i) => ({
           tag: `${cc}-${(loc.name || country?.labelEn || cc).toLowerCase().replace(/\s+/g, '-').slice(0, 20)}-${i + 1}`,
           type: 'vless',
-          ...(form.fragment ? { fragment: { enabled: true, ...(form.fm.trim() ? JSON.parse(form.fm.trim() || '{}') : { packets: 'tlshello', length: '10-50', interval: '10-20' }) } } : {}),
+          ...(form.fragment ? { fragment: { enabled: true, ...fragmentJson(form.fm) } } : {}),
           ...(form.ech ? { tls: { enabled: true, server_name: sni || undefined, ech: { enabled: true } } } : {}),
           ...(form.fingerprint ? { utls: { enabled: true, fingerprint: form.fingerprint } } : {}),
           ...(sni ? { server: { server: sni } } : {}),
@@ -818,7 +897,7 @@ export default function Members() {
         type: 'vless',
         server: ip,
         server_port: 443,
-        ...(form.fragment ? { fragment: { enabled: true, ...(form.fm.trim() ? JSON.parse(form.fm.trim() || '{}') : { packets: 'tlshello', length: '10-50', interval: '10-20' }) } } : {}),
+        ...(form.fragment ? { fragment: { enabled: true, ...fragmentJson(form.fm) } } : {}),
         ...(form.ech ? { tls: { enabled: true, server_name: sni || undefined, ech: { enabled: true } } } : {}),
         ...(form.fingerprint ? { utls: { enabled: true, fingerprint: form.fingerprint } } : {}),
       })),

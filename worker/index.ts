@@ -14,7 +14,7 @@ import { handleOptimizerCreate, handleOptimizerList, handleOptimizerGet, handleO
 import { handleOptProbe, handleOptPorts, handleOptScanBatch, handleOptSpeedtest } from './probe'
 import { handleGroupCreate, handleGroupList, handleGroupDelete, handleGroupPatch, serveGroupSub } from './subgroups'
 import { handleInjectorCreate, handleInjectorList, handleInjectorPatch, handleInjectorDelete, serveInjectedSub } from './injector'
-import { handleMemberCreate, handleMemberList, handleMemberPatch, handleMemberDelete, handleMemberBulk, handleCfQuota, refreshMemberUsage, serveMemberSub, handleMemberTest } from './members'
+import { handleMemberCreate, handleMemberCreateMany, handleMemberList, handleMemberPatch, handleMemberDelete, handleMemberBulk, handleCfQuota, refreshMemberUsage, serveMemberSub, handleMemberTest } from './members'
 import { serveStatusPage } from './status'
 import { exportBackup, importBackup } from './backup'
 import { handleSourceSettings, handleSourceNodes } from './sourcebridge'
@@ -813,6 +813,7 @@ async function handleRouted(
     if (path === '/api/members' && method === 'GET') return await handleMemberList(env, user.id, url.searchParams.get('deployment_id'))
     if (path === '/api/members' && method === 'POST') return await handleMemberCreate(env, user.id, request)
     if (path === '/api/members/bulk' && method === 'POST') return await handleMemberBulk(env, user.id, request)
+    if (path === '/api/members/create-many' && method === 'POST') return await handleMemberCreateMany(env, user.id, request)
     if (path === '/api/cf-quota' && method === 'GET') return await handleCfQuota(env, user.id)
     if (path.match(/^\/api\/members\/[^/]+\/usage$/) && method === 'POST') return await refreshMemberUsage(env, user.id, path.split('/')[3])
     if (path.match(/^\/api\/members\/[^/]+\/test$/) && method === 'GET') return await handleMemberTest(env, user.id, path.split('/')[3])
