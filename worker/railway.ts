@@ -10,7 +10,7 @@
  *   → env vars + start command → serviceInstanceDeployV2 → poll until SUCCESS
  */
 
-import { buildPanelDeployEnv, panelDataDir, panelTcpPorts, type PanelSpec } from '../shared/panels'
+import { buildPanelDeployEnv, panelBranch, panelDataDir, panelDataFile, panelTcpPorts, type PanelSpec } from '../shared/panels'
 
 export class RailwayApiError extends Error {
   /**
@@ -290,7 +290,7 @@ export async function deployToRailway(
         projectId,
         environmentId,
         name: projectName,
-        branch: 'main',
+        branch: panelBranch(panel),
         source: { repo: panel.repo },
       },
     },
@@ -488,4 +488,22 @@ export async function railwayDeployStatus(token: string, deploymentId: string): 
   const dep = data.deployment as { status?: string; url?: string | null; staticUrl?: string | null } | undefined
   if (!dep) throw new RailwayApiError('استقرار موردنظر پیدا نشد')
   return { status: dep.status ?? 'UNKNOWN', url: dep.url ?? dep.staticUrl ?? null }
+}
+
+/**
+ * Start a fresh build+deploy of an existing service from the newest commit on
+ * the service's tracked branch. This is what "بروزرسانی به آخرین نسخه" does:
+ * Railway rebuilds the repository HEAD, so the running panel moves to the
+ * latest upstream release without recreating the project, its volume or its
+ * environment variables.
+ */
+export async function railwayRedeploy(token: string, serviceId: string, environmentId: string): Promise<string> {
+  const dep = await gql(
+    token,
+    'mutation ($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }',
+    { serviceId, environmentId },
+  )
+  const deploymentId = dep.serviceInstanceDeployV2 as string | undefined
+  if (!deploymentId) throw new RailwayApiError('دستور بروزرسانی روی Railway اجرا نشد')
+  return deploymentId
 }

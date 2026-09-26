@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS railway_deploys (
   admin_username TEXT,
   admin_password TEXT,
   setup_done INTEGER NOT NULL DEFAULT 0,
+  -- Latest-version tracking (see worker/panel-deploy.ts): auto_update opts the
+  -- deployment into the scheduled "always on the newest release" sweep and
+  -- last_version remembers the upstream revision it was updated to.
+  auto_update INTEGER NOT NULL DEFAULT 0,
+  last_version TEXT,
+  last_updated_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -98,6 +104,9 @@ CREATE TABLE IF NOT EXISTS render_deploys (
   admin_username TEXT,
   admin_password TEXT,
   setup_done INTEGER NOT NULL DEFAULT 0,
+  auto_update INTEGER NOT NULL DEFAULT 0,
+  last_version TEXT,
+  last_updated_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

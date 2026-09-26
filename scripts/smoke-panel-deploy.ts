@@ -10,8 +10,24 @@
  *     listPanelDeploys flattens both platform tables, forgetPanelDeploy drops
  *     exactly one owned row and probePanelHealth fetches the panel's own
  *     health path from our stored URL
+ *   • latest-version tracking: fetchLatestPanelVersion reads the tracked branch
+ *     of the upstream repo, updatePanelDeploy rebuilds the existing service on
+ *     Railway *and* Render without losing its volume/env, setPanelAutoUpdate
+ *     flips the per-deployment flag (refusing other people's rows) and the
+ *     scheduled autoUpdatePanels sweep rebuilds only deployments that are
+ *     actually behind upstream
  */
-import { startPanelDeploy, updatePanelDeploy, watchPanelDeploy, listPanelDeploys, forgetPanelDeploy, probePanelHealth } from '../worker/panel-deploy'
+import {
+  startPanelDeploy,
+  watchPanelDeploy,
+  listPanelDeploys,
+  forgetPanelDeploy,
+  probePanelHealth,
+  fetchLatestPanelVersion,
+  updatePanelDeploy,
+  setPanelAutoUpdate,
+  autoUpdatePanels,
+} from '../worker/panel-deploy'
 import { verifyRailwayToken, RailwayApiError } from '../worker/railway'
 
 // ── fetch mocking ────────────────────────────────────────────────────────────
@@ -20,6 +36,8 @@ let gqlQueue: Array<Record<string, unknown>> = []
 let githubQueue: Array<Record<string, unknown>> = []
 let renderQueue: Array<{ status: number; body: unknown }> = []
 let setupStatus = 200
+/** Sha the fake GitHub commits endpoint reports as the newest upstream commit. */
+const UPSTREAM_SHA = 'abcdef1234567890abcdef1234567890abcdef12'
 
 const realFetch = globalThis.fetch
 function installFetch() {
@@ -41,8 +59,21 @@ function installFetch() {
       return new Response(JSON.stringify({ data: next }), { status: 200 })
     }
     if (url.includes('api.github.com')) {
-      const next = githubQueue.shift() ?? { sha: 'latest-sha', html_url: 'https://github.com/commit/latest-sha' }
-      return new Response(JSON.stringify(next), { status: 200 })
+      // A queued item models one specific commit lookup (the connected-repo
+      // "latest commit" read); otherwise answer the upstream version lookup with
+      // the newest commit of the tracked branch.
+      const queued = githubQueue.shift()
+      if (queued) return new Response(JSON.stringify(queued), { status: 200 })
+      return new Response(
+        JSON.stringify([
+          {
+            sha: UPSTREAM_SHA,
+            html_url: `https://github.com/miladjahani/Mizetusi/commit/${UPSTREAM_SHA}`,
+            commit: { message: 'feat: latest release\n\nmore detail', committer: { date: '2026-09-24T10:00:00Z' } },
+          },
+        ]),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
     }
     if (url.includes('api.render.com')) {
       const next = renderQueue.shift() ?? { status: 200, body: {} }
@@ -126,7 +157,11 @@ function makeDb() {
     return asSelect ? null : { meta: { changes: 1 } }
   }
 
-  /** SELECT … (no WHERE support beyond `user_id = ?`) → every matching row. */
+  /**
+   * SELECT … WHERE → matching rows. Conditions are `col = ?` (positional
+   * binds) or `col = <literal>`, which covers `user_id = ?` and the
+   * `auto_update = 1` filter the sweep uses.
+   */
   function execAll(sql: string, binds: unknown[]): Row[] {
     const sel = sql.match(/FROM (\w+)/)
     if (!sel) return []
@@ -136,11 +171,22 @@ function makeDb() {
       .slice(sql.toUpperCase().indexOf('SELECT') + 6, sql.toUpperCase().indexOf('FROM'))
       .split(',')
       .map((c) => c.trim().split(/\s+AS\s+/i)[0])
-    const scoped = /user_id\s*=\s*\?/.test(sql)
-    const userId = scoped ? String(binds[binds.length - 1]) : null
+    const conds: Array<(r: Row) => boolean> = []
+    for (const clause of (sql.match(/WHERE ([\s\S]*)$/)?.[1] ?? '').split(/\s+AND\s+/i)) {
+      const m = clause.trim().match(/^(\w+)\s*=\s*(\?|'[^']*'|\d+)$/)
+      if (!m) continue
+      const col = m[1]
+      if (m[2] === '?') {
+        const value = String(binds[conds.length])
+        conds.push((r) => String(r[col]) === value)
+      } else {
+        const value = m[2].startsWith("'") ? m[2].slice(1, -1) : m[2]
+        conds.push((r) => String(r[col]) === value)
+      }
+    }
     const rows: Row[] = []
     for (const r of t.values()) {
-      if (userId && String(r['user_id']) !== userId) continue
+      if (!conds.every((c) => c(r))) continue
       const out: Row = {}
       for (const c of cols) out[c] = r[c]
       rows.push(out)
@@ -165,13 +211,16 @@ function makeDb() {
 
   return {
     DB: {
-      prepare: (sql: string) => ({
-        bind: (...binds: unknown[]) => ({
+      // Real D1 lets you run a parameterless statement without calling bind(),
+      // so the shim exposes run/first/all both directly and after bind().
+      prepare: (sql: string) => {
+        const bound = (binds: unknown[]) => ({
           run: async () => (/DELETE FROM/i.test(sql) ? { meta: { changes: execDelete(sql, binds) ? 1 : 0 } } : exec(sql, binds)),
           first: async <T>() => (/DELETE FROM/i.test(sql) ? (execDelete(sql, binds) as T | null) : (exec(sql, binds, true) as T | null)),
           all: async <T>() => ({ results: execAll(sql, binds) as T[] }),
-        }),
-      }),
+        })
+        return Object.assign(bound([]), { bind: (...binds: unknown[]) => bound(binds) })
+      },
     },
     tables,
   }
@@ -247,19 +296,6 @@ async function main() {
     check('latest commit persisted', row?.['commit_sha'] === 'abc123def456' && row?.['current_deployment_id'] === 'dep1')
     check('activity logged', env.tables.activity_logs.size === 1)
   }
-
-  console.log('3b) manual update deploys the newest upstream commit')
-  githubQueue = [{ sha: 'newest999999', html_url: 'https://github.com/miladjahani/Mizetusi/commit/newest999999' }]
-  gqlQueue = [
-    { serviceInstanceAutoDeployUpdate: { enabled: true } },
-    { serviceInstanceDeployV2: 'dep2' },
-  ]
-  const updated = await updatePanelDeploy(env as never, 'u1', 'railway', 'dep1')
-  check('update started', updated.ok && updated.deploymentId === 'dep2', JSON.stringify(updated))
-  check('registry keeps stable id', env.tables.railway_deploys.has('dep1'))
-  check('current deployment advanced', env.tables.railway_deploys.get('dep1')?.['current_deployment_id'] === 'dep2')
-  check('new commit persisted', env.tables.railway_deploys.get('dep1')?.['commit_sha'] === 'newest999999')
-  check('update used the project token', calls.some((c) => c.headers?.['Project-Access-Token'] === 'project-token-1'))
 
   console.log('4) watch — first live poll bootstraps admin once')
   setupStatus = 200
@@ -442,6 +478,75 @@ async function main() {
     unknownMsg = e instanceof RailwayApiError ? e.message : `wrong error: ${String(e)}`
   }
   check('unknown token rejected generically', unknownMsg.includes('نامعتبر') && !unknownMsg.includes('Project/Environment'), unknownMsg)
+
+  console.log('11) latest upstream version (GitHub commits API)')
+  const latest = await fetchLatestPanelVersion(panel)
+  check('parsed sha', latest?.short === 'abcdef1', JSON.stringify(latest))
+  check('parsed commit date', latest?.date === '2026-09-24T10:00:00Z', String(latest?.date))
+  check('commit message first line only', latest?.message === 'feat: latest release', String(latest?.message))
+  check(
+    'read the branch the catalog declares',
+    calls.some((c) => c.url.includes(`/repos/${panel.repo}/commits`) && c.url.includes(`sha=${panel.defaultBranch}`)),
+  )
+
+  console.log('12) update → rebuild the existing railway service on the newest commit')
+  gqlQueue = [{ serviceInstanceDeployV2: 'dep2' }]
+  let updated = await updatePanelDeploy(env as never, 'u1', 'railway', 'dep1')
+  check('update accepted', updated.ok === true, JSON.stringify(updated))
+  if (updated.ok) {
+    check('row id follows the new deployment', updated.id === 'dep2')
+    check('upstream version attached', updated.version?.short === 'abcdef1')
+    check('first update is not “already latest”', updated.alreadyLatest === false)
+  }
+  const afterUpdate = await listPanelDeploys(env as never, 'u1')
+  const railAfterUpdate = afterUpdate.find((r) => r.platform === 'railway')!
+  check('registry reports the new deployment id', railAfterUpdate.id === 'dep2', railAfterUpdate.id)
+  check('last_version persisted', railAfterUpdate.lastVersion === UPSTREAM_SHA, String(railAfterUpdate.lastVersion))
+  check('last_updated_at persisted', !!railAfterUpdate.lastUpdatedAt, String(railAfterUpdate.lastUpdatedAt))
+  check('update logged', [...env.tables.activity_logs.values()].some((l) => l['action'] === 'panel_updated'))
+  const redeployCalls = calls.filter((c) => (c.body ?? '').includes('serviceInstanceDeployV2'))
+  check(
+    'railway rebuilt the same service (volume + env kept)',
+    redeployCalls.length >= 2 && (redeployCalls.at(-1)?.body ?? '').includes('svc1'),
+    `${redeployCalls.length} deploy calls`,
+  )
+
+  console.log('13) update → rebuild the existing render service')
+  env.tables.render_deploys.set('rr1', {
+    id: 'rr1', user_id: 'u1', token_id: 'rd1', service_id: 'srv9', name: 'render-two',
+    panel: panel.id, url: 'https://render-two.onrender.com', setup_done: 1, created_at: '2026-05-04T00:00:00.000Z',
+  })
+  renderQueue = [{ status: 200, body: { id: 'rnd2' } }]
+  updated = await updatePanelDeploy(env as never, 'u1', 'render', 'rr1')
+  check('render update accepted', updated.ok === true, JSON.stringify(updated))
+  if (updated.ok) check('render row id follows the deploy', updated.id === 'rnd2')
+  check('render deploy POSTed to the existing service', calls.some((c) => c.url.endsWith('/services/srv9/deploys') && c.method === 'POST'))
+  const renderRow = (await listPanelDeploys(env as never, 'u1')).find((r) => r.platform === 'render')!
+  check('render keeps its url', renderRow.url === 'https://render-two.onrender.com', String(renderRow.url))
+
+  console.log('14) auto-update flag + the scheduled sweep')
+  const on = await setPanelAutoUpdate(env as never, 'u1', 'render', 'rnd2', true)
+  check('flag switched on', on.ok === true && on.autoUpdate === true, JSON.stringify(on))
+  const off = await setPanelAutoUpdate(env as never, 'u1', 'render', 'rnd2', false)
+  check('flag switched off', off.ok === true && off.autoUpdate === false, JSON.stringify(off))
+  await setPanelAutoUpdate(env as never, 'u1', 'render', 'rnd2', true)
+  const foreignToggle = await setPanelAutoUpdate(env as never, 'u1', 'railway', 'not-mine', true)
+  check('unknown/foreign deployment refused', foreignToggle.ok === false)
+  check('auto-update change logged', [...env.tables.activity_logs.values()].some((l) => l['action'] === 'panel_auto_update_on'))
+
+  // Already on the newest sha → the sweep must not rebuild it (no wasted build).
+  const idle = await autoUpdatePanels(env as never)
+  check('sweep looked at the opted-in deployment', idle.checked === 1, JSON.stringify(idle))
+  check('nothing rebuilt while already current', idle.updated === 0 && idle.failed === 0, JSON.stringify(idle))
+
+  // Behind upstream → rebuilt exactly once, and the new sha is recorded.
+  const stored = [...env.tables.render_deploys.values()].find((r) => r['name'] === 'render-two')!
+  stored['last_version'] = '0000000000000000000000000000000000000000'
+  renderQueue = [{ status: 200, body: { id: 'rnd3' } }]
+  const sweep = await autoUpdatePanels(env as never)
+  check('sweep rebuilt the stale deployment', sweep.updated === 1 && sweep.failed === 0, JSON.stringify(sweep))
+  const swept = (await listPanelDeploys(env as never, 'u1')).find((r) => r.platform === 'render')!
+  check('swept deployment records the upstream sha', swept.lastVersion === UPSTREAM_SHA && swept.id === 'rnd3', `${swept.id} · ${swept.lastVersion}`)
 
   console.log(`\n${pass} passed, ${fail} failed`)
   globalThis.fetch = realFetch

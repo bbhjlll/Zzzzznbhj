@@ -14,7 +14,7 @@
  *   GET  /v1/deploys/{id} → status (created → build_in_progress → live)
  */
 
-import { buildPanelDeployEnv, type PanelSpec } from '../shared/panels'
+import { buildPanelDeployEnv, panelBranch, panelDataFile, type PanelSpec } from '../shared/panels'
 
 export class RenderApiError extends Error {
   constructor(message: string) {
@@ -118,6 +118,7 @@ function buildRenderYaml(name: string, panel: PanelSpec, values: PanelDeployEnv)
       '    runtime: docker',
       '    plan: starter',
       `    repo: https://github.com/${panel.repo}`,
+      `    branch: ${panelBranch(panel)}`,
       `    dockerfilePath: ${panel.dockerfilePath ?? 'Dockerfile'}`,
       `    healthCheckPath: ${panel.healthPath ?? panel.panelPath}`,
     )
@@ -126,7 +127,7 @@ function buildRenderYaml(name: string, panel: PanelSpec, values: PanelDeployEnv)
       '    env: python',
       '    plan: free',
       `    repo: https://github.com/${panel.repo}`,
-      '    branch: main',
+      `    branch: ${panelBranch(panel)}`,
       `    buildCommand: ${panel.buildCommand ?? 'pip install -r requirements.txt'}`,
       `    startCommand: ${panel.startCommand ?? 'python main.py'}`,
       `    healthCheckPath: ${panel.healthPath ?? panel.panelPath}`,
@@ -232,4 +233,20 @@ export async function renderDeployStatus(
     url = svc?.serviceDetails?.url ?? svc?.service?.serviceDetails?.url ?? svc?.service?.url ?? null
   }
   return { status: (dep.status ?? 'UNKNOWN').toUpperCase(), url }
+}
+
+/**
+ * Start a fresh build+deploy of an existing Render service from the newest
+ * commit on its branch. Render keeps the service, its disk and its env vars,
+ * so this is the in-place "update the panel to the latest version" action.
+ */
+export async function renderRedeploy(token: string, serviceId: string): Promise<string> {
+  const deploy = await renderFetch<{ id?: string }>(
+    token,
+    `/services/${encodeURIComponent(serviceId)}/deploys`,
+    { method: 'POST', body: JSON.stringify({}) },
+  )
+  const deployId = deploy?.id
+  if (!deployId) throw new RenderApiError('دستور بروزرسانی روی Render اجرا نشد')
+  return deployId
 }

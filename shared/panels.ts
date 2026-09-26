@@ -85,6 +85,12 @@ export interface PanelSpec {
   repo: string
   /** Full repository URL. */
   url: string
+  /**
+   * Branch the deployers build from *and* the branch the version check reads.
+   * Keeping it in the catalog means "the latest version" is one definition for
+   * the Railway deploy, the Render blueprint and the upstream-version probe.
+   */
+  defaultBranch?: string
   /** docker = container image; python = plain Python app. */
   runtime: PanelRuntime
   /** Port the panel listens on. */
@@ -178,6 +184,7 @@ export const PANELS: PanelSpec[] = [
       'NEXUS (Mizetusi) — کنترل‌سنتر FastAPI + Xray با ماتریس کامل ترانسپورت (VLESS/VMess/Trojan/Shadowsocks/Reality) و پل ورکر کلودفلر',
     repo: 'miladjahani/Mizetusi',
     url: 'https://github.com/miladjahani/Mizetusi',
+    defaultBranch: 'main',
     runtime: 'docker',
     port: 8080,
     // Every raw-TCP capability, in the order a client should try them. On a VPS
@@ -326,6 +333,11 @@ export function panelRepoUrl(panel: PanelSpec): string {
 export function panelTcpPorts(panel: PanelSpec): PanelTcpPort[] {
   if (panel.tcpPorts?.length) return panel.tcpPorts
   return (panel.extraPorts ?? []).map((port) => ({ port, label: `TCP ${port}` }))
+}
+
+/** Branch the deployers build and the version check reads (`main` by default). */
+export function panelBranch(panel: PanelSpec): string {
+  return panel.defaultBranch ?? 'main'
 }
 
 /** Generated and user-specific values used to build a deployment manifest. */

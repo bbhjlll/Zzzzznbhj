@@ -29,5 +29,11 @@ run_worker_first = ["/api/*", "/status/*"]
 # D1 round-trips per request, so co-locating them cuts real-world latency.
 # (Enabled programmatically per-deploy via the script settings API in deploy.ts.)
 
+# The dedicated panel must not drift behind its upstream repository, so a cron
+# collector rebuilds every deployment that opted into "بروزرسانی خودکار" when a
+# newer commit appears (see the `scheduled` handler in worker/index.ts).
+[triggers]
+crons = ["17 */6 * * *"]
+
 [observability]
 enabled = true

@@ -260,11 +260,38 @@ export interface HostedPanelDeploy {
   tcpProxies: Array<{ label: string; domain: string; port: number; applicationPort: number }>
   tcpProxyError: string | null
   createdAt: string | null
+  /** Rebuilds itself from the newest upstream commit on its own. */
+  autoUpdate: boolean
+  /** Upstream revision the last update pointed this deployment at. */
+  lastVersion: string | null
+  /** When the last update/rebuild was triggered (ISO), null if never. */
+  lastUpdatedAt: string | null
+}
+
+/** Newest upstream commit of the panel's repository (from `GET /panels`). */
+export interface PanelVersion {
+  sha: string
+  short: string
+  date: string | null
+  message: string | null
+  url: string
 }
 
 export interface HostedPanelOverview {
   panel: HostedPanelSpec
   deploys: HostedPanelDeploy[]
+  /** Best-effort upstream revision; null when GitHub was unreachable. */
+  latestVersion: PanelVersion | null
+}
+
+/** Result of `POST /panels/update` — the deployment is rebuilt on the latest commit. */
+export interface HostedPanelUpdate {
+  platform: 'railway' | 'render'
+  /** Row id after the update (the new platform deployment id). */
+  id: string
+  version: PanelVersion | null
+  /** True when it was already on the newest revision before this rebuild. */
+  alreadyLatest: boolean
 }
 
 /** Result of polling one hosted panel (`POST /panels/watch`). */
@@ -279,14 +306,6 @@ export interface HostedPanelWatch {
   firstLive?: boolean
   /** Why a raw-TCP capability could not be switched on inside the panel. */
   capabilitiesError?: string | null
-}
-
-/** Result of deploying the newest upstream commit (`POST /panels/update`). */
-export interface HostedPanelUpdate {
-  platform: 'railway'
-  deploymentId: string
-  commitSha: string
-  commitUrl: string
 }
 
 /** Result of the edge health probe (`POST /panels/health`). */

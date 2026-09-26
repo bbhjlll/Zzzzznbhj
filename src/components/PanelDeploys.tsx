@@ -9,7 +9,8 @@
  *
  *   • بررسی زنده  → POST /panels/watch   (polls the platform, bootstraps admin once)
  *   • بررسی سلامت → POST /panels/health  (fetches the panel's own /health from the edge)
- *   • آخرین نسخه  → POST /panels/update  (deploys the newest connected-repo commit)
+ *   • بروزرسانی   → POST /panels/update  (rebuilds the service from the newest commit)
+ *   • بروزرسانی خودکار → POST /panels/auto-update (scheduled sweep keeps it current)
  *   • حذف از فهرست → POST /panels/forget (forgets the record; the service keeps running)
  */
 import { useCallback, useEffect, useState } from 'react'
@@ -17,6 +18,7 @@ import { Link } from 'react-router-dom'
 import {
   Activity,
   AlertTriangle,
+  ArrowUpCircle,
   Check,
   CheckCircle2,
   Cloud,
@@ -33,7 +35,13 @@ import {
   Trash2,
 } from 'lucide-react'
 import { api } from '../lib/api'
-import type { HostedPanelDeploy, HostedPanelHealth, HostedPanelOverview, HostedPanelWatch } from '../lib/types'
+import type {
+  HostedPanelDeploy,
+  HostedPanelHealth,
+  HostedPanelOverview,
+  HostedPanelUpdate,
+  HostedPanelWatch,
+} from '../lib/types'
 
 interface Props {
   /** `card` = dashboard summary (fits in a glass card), `full` = deployments tab. */
@@ -61,6 +69,8 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState<Record<string, LiveState>>({})
   const [busy, setBusy] = useState<string | null>(null)
+  /** Separate from `busy` so only the button that was clicked shows a spinner. */
+  const [updating, setUpdating] = useState<string | null>(null)
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
   const [copied, setCopied] = useState<string | null>(null)
 
@@ -107,6 +117,52 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
     }
   }
 
+  /**
+   * Rebuild one deployment from the newest upstream commit.
+   *
+   * The row id becomes the deployment that was just started (every deploy row
+   * uses the platform deployment id as its id), so the live state moves to the
+   * new key — the card keeps showing "در حال ساخت" for the update it triggered.
+   */
+  const update = async (d: HostedPanelDeploy) => {
+    setBusy(key(d))
+    setUpdating(key(d))
+    try {
+      const { data: res } = await api<{ data: HostedPanelUpdate }>('/panels/update', {
+        method: 'POST',
+        body: { platform: d.platform, id: d.id },
+      })
+      setLive((prev) => {
+        const next = { ...prev }
+        delete next[key(d)]
+        next[`${d.platform}:${res.id}`] = {
+          state: 'pending',
+          status: res.version ? `بروزرسانی به ${res.version.short}` : 'بروزرسانی',
+        }
+        return next
+      })
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'بروزرسانی پنل ناموفق بود')
+    } finally {
+      setUpdating(null)
+      setBusy(null)
+    }
+  }
+
+  /** Opt a deployment in/out of the scheduled latest-version sweep. */
+  const toggleAutoUpdate = async (d: HostedPanelDeploy, enabled: boolean) => {
+    setBusy(key(d))
+    try {
+      await api('/panels/auto-update', { method: 'POST', body: { platform: d.platform, id: d.id, enabled } })
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'تغییر بروزرسانی خودکار ناموفق بود')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   /** Probe the panel's own health endpoint from the edge. */
   const checkHealth = async (d: HostedPanelDeploy) => {
     setBusy(key(d))
@@ -118,30 +174,6 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
       setLive((prev) => ({ ...prev, [key(d)]: { ...(prev[key(d)] ?? { state: 'pending', status: '' }), health } }))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'بررسی سلامت ناموفق بود')
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  /** Deploy the newest commit from the panel's connected Railway repository. */
-  const updateLatest = async (d: HostedPanelDeploy) => {
-    if (d.platform !== 'railway') return
-    setBusy(key(d))
-    setError(null)
-    try {
-      const { data: update } = await api<{ data: { deploymentId: string; commitSha: string } }>('/panels/update', {
-        method: 'POST',
-        body: { platform: d.platform, id: d.id },
-      })
-      setLive((prev) => ({
-        ...prev,
-        [key(d)]: { state: 'pending', status: 'QUEUED', health: prev[key(d)]?.health },
-      }))
-      await load()
-      setCopied(`updated:${update.deploymentId}`)
-      setTimeout(() => setCopied(null), 2200)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'استقرار آخرین نسخه ناموفق بود')
     } finally {
       setBusy(null)
     }
@@ -227,6 +259,19 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
             </span>
           ))}
           {panel.verifiedAt && <span className="chip">بررسی‌شده {panel.verifiedAt}</span>}
+          {data?.latestVersion && (
+            <a
+              href={data.latestVersion.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="chip-live"
+              title={data.latestVersion.message ?? 'آخرین کامیت مخزن بالادست'}
+            >
+              <ArrowUpCircle className="w-3.5 h-3.5" />
+              آخرین نسخهٔ بالادست: <code dir="ltr">{data.latestVersion.short}</code>
+              {data.latestVersion.date ? ` · ${data.latestVersion.date.slice(0, 10)}` : ''}
+            </a>
+          )}
         </div>
       )}
 
@@ -261,6 +306,7 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
             const k = key(d)
             const state = live[k]
             const busyHere = busy === k
+            const updatingHere = updating === k
             const isRevealed = revealed.has(k)
             return (
               <div key={k} className="rounded-2xl border border-white/[0.07] bg-black/30 p-4 animate-slide-up">
@@ -360,6 +406,20 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
                   </div>
                 )}
 
+                {/* Update state: what revision this deployment was last pointed at */}
+                {(d.lastUpdatedAt || d.lastVersion) && (
+                  <p className="text-[11px] text-slate-500 mt-2">
+                    آخرین بروزرسانی:{' '}
+                    {d.lastUpdatedAt ? new Date(d.lastUpdatedAt).toLocaleString('fa-IR') : '—'}
+                    {d.lastVersion ? (
+                      <>
+                        {' '}
+                        · نسخه <code dir="ltr">{d.lastVersion.slice(0, 7)}</code>
+                      </>
+                    ) : null}
+                  </p>
+                )}
+
                 {/* Health probe result */}
                 {state?.health && (
                   <p className={`text-[11px] mt-2 ${state.health.ok ? 'text-brand-300' : 'text-warning-300'}`} dir="ltr">
@@ -386,17 +446,27 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
                   >
                     <Activity className="w-3.5 h-3.5" /> بررسی سلامت
                   </button>
-                  {d.platform === 'railway' && (
-                    <button
-                      onClick={() => void updateLatest(d)}
-                      disabled={busyHere}
-                      className="btn-secondary text-xs flex items-center gap-1.5"
-                      title="آخرین commit شاخه main مخزن متصل را همین حالا مستقر می‌کند"
-                    >
-                      {busyHere ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Rocket className="w-3.5 h-3.5" />}
-                      استقرار آخرین نسخه
-                    </button>
-                  )}
+                  <button
+                    onClick={() => void update(d)}
+                    disabled={busyHere}
+                    data-guide="p-update"
+                    className="btn-ghost text-xs flex items-center gap-1.5"
+                    title="سرویس فعلی از نو ساخته می‌شود و روی آخرین نسخهٔ مخزن بالادست می‌رود"
+                  >
+                    {updatingHere ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowUpCircle className="w-3.5 h-3.5" />}
+                    بروزرسانی به آخرین نسخه
+                  </button>
+                  <button
+                    onClick={() => void toggleAutoUpdate(d, !d.autoUpdate)}
+                    disabled={busyHere}
+                    data-guide="p-auto-update"
+                    className={`text-xs inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border transition-colors ${
+                      d.autoUpdate ? 'text-brand-300 border-brand-300/40 bg-brand-500/10' : 'text-slate-400 border-white/[0.08]'
+                    }`}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full ${d.autoUpdate ? 'bg-brand-300 animate-pulse-dot' : 'bg-slate-600'}`} />
+                    بروزرسانی خودکار {d.autoUpdate ? 'روشن' : 'خاموش'}
+                  </button>
                   {state?.state === 'live' && (
                     <span className="text-[11px] text-brand-300 inline-flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" /> روی {PLATFORM_LABEL[d.platform]} زنده است
