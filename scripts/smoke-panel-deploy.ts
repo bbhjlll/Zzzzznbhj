@@ -11,12 +11,13 @@
  *     exactly one owned row and probePanelHealth fetches the panel's own
  *     health path from our stored URL
  */
-import { startPanelDeploy, watchPanelDeploy, listPanelDeploys, forgetPanelDeploy, probePanelHealth } from '../worker/panel-deploy'
+import { startPanelDeploy, updatePanelDeploy, watchPanelDeploy, listPanelDeploys, forgetPanelDeploy, probePanelHealth } from '../worker/panel-deploy'
 import { verifyRailwayToken, RailwayApiError } from '../worker/railway'
 
 // ── fetch mocking ────────────────────────────────────────────────────────────
 const calls: Array<{ url: string; method: string; body?: string; headers?: Record<string, string> }> = []
 let gqlQueue: Array<Record<string, unknown>> = []
+let githubQueue: Array<Record<string, unknown>> = []
 let renderQueue: Array<{ status: number; body: unknown }> = []
 let setupStatus = 200
 
@@ -39,6 +40,10 @@ function installFetch() {
       }
       return new Response(JSON.stringify({ data: next }), { status: 200 })
     }
+    if (url.includes('api.github.com')) {
+      const next = githubQueue.shift() ?? { sha: 'latest-sha', html_url: 'https://github.com/commit/latest-sha' }
+      return new Response(JSON.stringify(next), { status: 200 })
+    }
     if (url.includes('api.render.com')) {
       const next = renderQueue.shift() ?? { status: 200, body: {} }
       return new Response(JSON.stringify(next.body), { status: next.status })
@@ -60,7 +65,7 @@ function makeDb() {
   }
   function exec(sql: string, binds: unknown[], asSelect = false): { meta: { changes: number } } | Row | null {
     const ins = sql.match(/INSERT INTO (\w+)/)
-    const upd = sql.match(/UPDATE (\w+) SET([\s\S]*?)WHERE([\s\S]*)$/)
+    const upd = sql.match(/UPDATE\s+(\w+)\s+SET([\s\S]*?)WHERE([\s\S]*)$/)
     const sel = sql.match(/FROM (\w+)/)
     if (ins && !asSelect) {
       const t = tables[ins[1]]
@@ -78,11 +83,11 @@ function makeDb() {
         (r) => String(r['id']) === String(binds[binds.length - 2]) && String(r['user_id']) === String(binds[binds.length - 1]),
       )
       if (!target) return { meta: { changes: 0 } }
+      let placeholderIndex = 0
       for (const assign of upd[2].split(',')) {
         const [col, val] = assign.split('=').map((s) => s.trim())
         if (val === '?') {
-          const phIndex = sql.slice(0, sql.indexOf(assign)).split('?').length - 1
-          target[col] = binds[phIndex]
+          target[col] = binds[placeholderIndex++]
         } else if (/^\d+$/.test(val)) {
           target[col] = Number(val)
         } else if (val === 'NULL') {
@@ -204,18 +209,24 @@ async function main() {
   check('vps-only panel rejected', !r.ok && r.error.includes('VPS'))
 
   console.log('3) railway happy path')
+  githubQueue = [{ sha: 'abc123def456', html_url: 'https://github.com/miladjahani/Mizetusi/commit/abc123def456' }]
   gqlQueue = [
     { me: { workspaces: [{ id: 'ws1', name: 'W' }] } },            // workspaces
     { projectCreate: { id: 'prj1' } },                              // projectCreate
     { project: { environments: { edges: [{ node: { id: 'env1', name: 'production' } }] } } }, // envs
     { serviceCreate: { id: 'svc1' } },                              // serviceCreate
+    { serviceInstanceAutoDeployUpdate: { enabled: false } },         // pause source deploys
     {},                                                             // instanceUpdate
     { serviceDomainCreate: { domain: 'my-app.up.railway.app' } },   // domain
     { volumeCreate: { id: 'vol1' } },                               // data volume
-    // One variableUpsert per env var: PORT, ADMIN_PASSWORD, JWT_SECRET,
-    // SQLITE_PATH and RAILWAY_RUN_UID.
-    {}, {}, {}, {}, {},
-    { serviceInstanceDeployV2: 'dep1' },                            // deploy trigger
+    { projectTokenCreate: 'project-token-1' },                      // project-scoped token
+    { tcpProxyCreate: { id: 'tcp1', domain: 'proxy1.rlwy.net', proxyPort: 23177, applicationPort: 8443 } },
+    { tcpProxyCreate: { id: 'tcp2', domain: 'proxy2.rlwy.net', proxyPort: 23178, applicationPort: 8446 } },
+    { tcpProxyCreate: { id: 'tcp3', domain: 'proxy3.rlwy.net', proxyPort: 23179, applicationPort: 8448 } },
+    // Complete manifest + RAILWAY_RUN_UID. Every write skips its own deploy.
+    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+    { serviceInstanceAutoDeployUpdate: { enabled: true } },          // future GitHub pushes
+    { serviceInstanceDeployV2: 'dep1' },                            // exact latest commit
   ]
   r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'my-app', panel })
   check('started ok', r.ok, JSON.stringify(r).slice(0, 120))
@@ -224,8 +235,31 @@ async function main() {
     check('returns admin creds', r.adminUsername === 'admin' && r.adminPassword.length >= 10)
     const row = env.tables.railway_deploys.get(r.id)
     check('deploy row persisted', !!row && row['panel'] === panel.id && row['admin_password'] === r.adminPassword)
+    check('project token persisted privately', row?.['project_token'] === 'project-token-1')
+    check('TCP proxy persisted', row?.['tcp_proxy_domain'] === 'proxy1.rlwy.net' && row?.['tcp_proxy_port'] === 23177)
+    // Every raw port gets its own public proxy: reality + mtproto + web-http.
+    const storedProxies = JSON.parse(String(row?.['tcp_proxies'] ?? '[]')) as Array<{ applicationPort: number; label?: string }>
+    check(
+      'all three raw ports proxied',
+      storedProxies.length === 3 && [8443, 8446, 8448].every((p) => storedProxies.some((t) => t.applicationPort === p)),
+      JSON.stringify(storedProxies),
+    )
+    check('latest commit persisted', row?.['commit_sha'] === 'abc123def456' && row?.['current_deployment_id'] === 'dep1')
     check('activity logged', env.tables.activity_logs.size === 1)
   }
+
+  console.log('3b) manual update deploys the newest upstream commit')
+  githubQueue = [{ sha: 'newest999999', html_url: 'https://github.com/miladjahani/Mizetusi/commit/newest999999' }]
+  gqlQueue = [
+    { serviceInstanceAutoDeployUpdate: { enabled: true } },
+    { serviceInstanceDeployV2: 'dep2' },
+  ]
+  const updated = await updatePanelDeploy(env as never, 'u1', 'railway', 'dep1')
+  check('update started', updated.ok && updated.deploymentId === 'dep2', JSON.stringify(updated))
+  check('registry keeps stable id', env.tables.railway_deploys.has('dep1'))
+  check('current deployment advanced', env.tables.railway_deploys.get('dep1')?.['current_deployment_id'] === 'dep2')
+  check('new commit persisted', env.tables.railway_deploys.get('dep1')?.['commit_sha'] === 'newest999999')
+  check('update used the project token', calls.some((c) => c.headers?.['Project-Access-Token'] === 'project-token-1'))
 
   console.log('4) watch — first live poll bootstraps admin once')
   setupStatus = 200
@@ -240,8 +274,24 @@ async function main() {
   // Bootstrap runs only for panels that declare a setup endpoint; the shipped
   // panel configures itself from env vars, so it expects zero POSTs.
   const expectedSetupPosts = panel.setupPath ? 1 : 0
-  const setupCalls = calls.filter((c) => c.url.includes('my-app.up.railway.app') && c.method === 'POST')
+  const panelPosts = (endpoint: string) => calls.filter((c) => c.url.includes('my-app.up.railway.app') && c.method === 'POST' && c.url.includes(endpoint))
+  const setupCalls = panelPosts(panel.setupPath ?? '/__no_setup__')
   check(`setup POSTs on first poll (${expectedSetupPosts})`, setupCalls.length === expectedSetupPosts, `got ${setupCalls.length}`)
+  // The panel ships with the raw-port listeners off; the deploy flips them on
+  // through its own save API right after it comes up.
+  const capabilityPosts = panelPosts('/api/telegram')
+  check(
+    'raw-port capabilities enabled once',
+    capabilityPosts.length === 1,
+    `got ${capabilityPosts.length}`,
+  )
+  if (capabilityPosts[0]) {
+    const sent = JSON.parse(capabilityPosts[0].body ?? '{}') as Record<string, Record<string, unknown>>
+    check('mtproto enabled', sent['mtproto']?.['enabled'] === '1', capabilityPosts[0].body ?? '')
+    check('web-http enabled', sent['webproxy']?.['web-http']?.['enabled'] === '1', capabilityPosts[0].body ?? '')
+    check('admin password sent as header', !!capabilityPosts[0].headers?.['x-admin-password'])
+  }
+  check('capabilities reported ok', w1.state === 'live' && w1.capabilitiesError == null, w1.state === 'live' ? String(w1.capabilitiesError) : '')
   const afterRow = env.tables.railway_deploys.get('dep1')
   check('setup_done flipped', afterRow?.['setup_done'] === 1, `row=${JSON.stringify(afterRow)}`)
 
@@ -250,8 +300,8 @@ async function main() {
   const w2 = await watchPanelDeploy(env as never, 'u1', 'railway', 'dep1')
   check('still live', w2.state === 'live')
   check('firstLive=false', w2.state === 'live' && w2.firstLive === false)
-  const setupCalls2 = calls.filter((c) => c.url.includes('my-app.up.railway.app') && c.method === 'POST')
-  check('no repeat setup POST', setupCalls2.length === expectedSetupPosts, `got ${setupCalls2.length}`)
+  check('no repeat setup POST', panelPosts(panel.setupPath ?? '/__no_setup__').length === expectedSetupPosts)
+  check('no repeat capability POST', panelPosts('/api/telegram').length === 1)
 
   console.log('6) render token on a railway-only panel → mismatch error')
   // Same trick the other way round: a railway-only variant must reject a Render key.
@@ -298,6 +348,9 @@ async function main() {
     varBodies.length > 0 && varBodies.every((b) => b.includes('"skipDeploys":true')),
     `${varBodies.length} writes`,
   )
+  check('automatic GitHub deploys enabled', calls.some((c) => (c.body ?? '').includes('serviceInstanceAutoDeployUpdate') && (c.body ?? '').includes('"enabled":true')))
+  check('initial deploy pins latest SHA', calls.some((c) => (c.body ?? '').includes('serviceInstanceDeployV2') && (c.body ?? '').includes('"commitSha":"abc123def456"')))
+  check('full runtime manifest injected', ['NEXUS_PLATFORM', 'XRAY_ENABLED', 'WARP_ENABLED', 'NEXUS_HTTP_PORT', 'PUBLIC_BASE_URL', 'NEXUS_RAILWAY_TOKEN'].every((name) => varBodies.some((body) => body.includes(name))))
   const dates = registry.map((r) => String(r.createdAt ?? ''))
   check('newest first', dates.every((d, i) => i === 0 || dates[i - 1] >= d), dates.join(' > '))
 
@@ -355,6 +408,26 @@ async function main() {
   }
   check('denied call is retried and then accepted', retried?.name === 'Recovered', retryErr)
   check('only two attempts were made', gqlQueue.length === 0, `left ${gqlQueue.length}`)
+
+  // Account-level refusals get actionable Persian text instead of Railway's
+  // English sentence (both were hit for real while testing a live deploy).
+  gqlQueue = [{ __errors: [{ message: 'Free plan resource provision limit exceeded. Please upgrade to provision more resources!' }] }]
+  let quotaMsg = ''
+  try {
+    await verifyRailwayToken('11111111-2222-3333-4444-555555555555')
+  } catch (e) {
+    quotaMsg = e instanceof RailwayApiError ? e.message : String(e)
+  }
+  check('resource limit explained in Persian', quotaMsg.includes('سهمیهٔ منابع'), quotaMsg)
+
+  gqlQueue = [{ __errors: [{ message: 'You are creating projects too quickly. This workspace allows 1 project per 30 seconds. Try again shortly.' }] }]
+  let fastMsg = ''
+  try {
+    await verifyRailwayToken('11111111-2222-3333-4444-555555555555')
+  } catch (e) {
+    fastMsg = e instanceof RailwayApiError ? e.message : String(e)
+  }
+  check('project rate limit explained in Persian', fastMsg.includes('۳۰ ثانیه'), fastMsg)
 
   // A token Railway does not recognise at all keeps the generic message.
   gqlQueue = [

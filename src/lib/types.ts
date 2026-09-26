@@ -222,6 +222,8 @@ export interface HostedPanelSpec {
   repoUrl: string
   port: number
   extraPorts: number[]
+  /** Raw-TCP capabilities this panel publishes, with their labels. */
+  tcpPorts: Array<{ port: number; label: string }>
   panelPath: string
   healthPath: string
   origin: string | null
@@ -248,6 +250,15 @@ export interface HostedPanelDeploy {
   adminPassword: string | null
   setupDone: boolean
   dashboardUrl: string | null
+  currentDeploymentId: string | null
+  branch: string | null
+  commitSha: string | null
+  commitUrl: string | null
+  autoDeploy: boolean
+  tcpProxy: { domain: string; port: number; applicationPort: number } | null
+  /** Every published raw-TCP capability (Reality, MTProto, HTTP …). */
+  tcpProxies: Array<{ label: string; domain: string; port: number; applicationPort: number }>
+  tcpProxyError: string | null
   createdAt: string | null
 }
 
@@ -266,6 +277,16 @@ export interface HostedPanelWatch {
   adminUsername?: string | null
   adminPassword?: string | null
   firstLive?: boolean
+  /** Why a raw-TCP capability could not be switched on inside the panel. */
+  capabilitiesError?: string | null
+}
+
+/** Result of deploying the newest upstream commit (`POST /panels/update`). */
+export interface HostedPanelUpdate {
+  platform: 'railway'
+  deploymentId: string
+  commitSha: string
+  commitUrl: string
 }
 
 /** Result of the edge health probe (`POST /panels/health`). */

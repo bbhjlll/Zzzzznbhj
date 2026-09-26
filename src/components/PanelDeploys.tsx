@@ -9,6 +9,7 @@
  *
  *   • بررسی زنده  → POST /panels/watch   (polls the platform, bootstraps admin once)
  *   • بررسی سلامت → POST /panels/health  (fetches the panel's own /health from the edge)
+ *   • آخرین نسخه  → POST /panels/update  (deploys the newest connected-repo commit)
  *   • حذف از فهرست → POST /panels/forget (forgets the record; the service keeps running)
  */
 import { useCallback, useEffect, useState } from 'react'
@@ -93,7 +94,12 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
         ...prev,
         [key(d)]: { state: res.state, status: res.status, health: prev[key(d)]?.health },
       }))
-      if (res.state === 'live') await load()
+      if (res.state === 'live') {
+        // The panel refused to switch a published raw-TCP port on — the deploy
+        // itself is fine, so it is a warning rather than a failed state.
+        if (res.capabilitiesError) setError(res.capabilitiesError)
+        await load()
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'بررسی وضعیت ناموفق بود')
     } finally {
@@ -112,6 +118,30 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
       setLive((prev) => ({ ...prev, [key(d)]: { ...(prev[key(d)] ?? { state: 'pending', status: '' }), health } }))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'بررسی سلامت ناموفق بود')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Deploy the newest commit from the panel's connected Railway repository. */
+  const updateLatest = async (d: HostedPanelDeploy) => {
+    if (d.platform !== 'railway') return
+    setBusy(key(d))
+    setError(null)
+    try {
+      const { data: update } = await api<{ data: { deploymentId: string; commitSha: string } }>('/panels/update', {
+        method: 'POST',
+        body: { platform: d.platform, id: d.id },
+      })
+      setLive((prev) => ({
+        ...prev,
+        [key(d)]: { state: 'pending', status: 'QUEUED', health: prev[key(d)]?.health },
+      }))
+      await load()
+      setCopied(`updated:${update.deploymentId}`)
+      setTimeout(() => setCopied(null), 2200)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'استقرار آخرین نسخه ناموفق بود')
     } finally {
       setBusy(null)
     }
@@ -258,6 +288,23 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
                   </span>
                 </div>
 
+                {d.commitUrl && (
+                  <a href={d.commitUrl} target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-white inline-flex items-center gap-1" dir="ltr">
+                    <Github className="w-3.5 h-3.5" /> {d.commitSha?.slice(0, 7) ?? 'latest'}
+                  </a>
+                )}
+                {(d.tcpProxies?.length ?? 0) > 0 && (
+                  <span className="text-slate-400 inline-flex items-center gap-1" dir="ltr" title="Railway TCP Proxy">
+                    <Server className="w-3.5 h-3.5" />
+                    {d.tcpProxies!.map((p) => `${p.label}: ${p.domain}:${p.port}`).join(' · ')}
+                  </span>
+                )}
+                {d.tcpProxyError && (
+                  <span className="text-warning-300 inline-flex items-center gap-1" title={d.tcpProxyError}>
+                    <AlertTriangle className="w-3.5 h-3.5" /> TCP Proxy نیاز به بررسی
+                  </span>
+                )}
+
                 {/* Links: open the panel, or jump to the platform dashboard */}
                 <div className="flex flex-wrap items-center gap-3 mt-3 text-xs">
                   {d.panelUrl ? (
@@ -339,6 +386,17 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
                   >
                     <Activity className="w-3.5 h-3.5" /> بررسی سلامت
                   </button>
+                  {d.platform === 'railway' && (
+                    <button
+                      onClick={() => void updateLatest(d)}
+                      disabled={busyHere}
+                      className="btn-secondary text-xs flex items-center gap-1.5"
+                      title="آخرین commit شاخه main مخزن متصل را همین حالا مستقر می‌کند"
+                    >
+                      {busyHere ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Rocket className="w-3.5 h-3.5" />}
+                      استقرار آخرین نسخه
+                    </button>
+                  )}
                   {state?.state === 'live' && (
                     <span className="text-[11px] text-brand-300 inline-flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" /> روی {PLATFORM_LABEL[d.platform]} زنده است

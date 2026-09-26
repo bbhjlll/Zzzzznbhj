@@ -4,7 +4,7 @@ import { handleSignup, handleLogin, handleLogout, handleMe, isOwner } from './au
 import { startDeployment } from './deploy'
 import { verifyRailwayToken, RailwayApiError } from './railway'
 import { verifyRenderToken, RenderApiError } from './render'
-import { startPanelDeploy, watchPanelDeploy, listPanelDeploys, forgetPanelDeploy, probePanelHealth } from './panel-deploy'
+import { startPanelDeploy, watchPanelDeploy, listPanelDeploys, forgetPanelDeploy, probePanelHealth, updatePanelDeploy } from './panel-deploy'
 import { handleWorkerConfig } from './kvconfig'
 import { handleIpScanner, handleRangeScan } from './scanner'
 import { handleTelegramWebhook } from './telegram'
@@ -18,7 +18,7 @@ import { handleMemberCreate, handleMemberList, handleMemberPatch, handleMemberDe
 import { serveStatusPage } from './status'
 import { exportBackup, importBackup } from './backup'
 import { handleSourceSettings, handleSourceNodes } from './sourcebridge'
-import { resolvePanel } from '../shared/panels'
+import { panelTcpPorts, resolvePanel } from '../shared/panels'
 
 interface DeploymentBody {
   name?: string
@@ -138,7 +138,7 @@ async function handleRailwayDeploy(env: Env, userId: string, request: Request): 
   return json({
     data: {
       deploymentId: started.id,
-      projectId: started.id,
+      projectId: started.projectId ?? started.id,
       projectUrl: started.dashboardUrl,
       domain: started.domain,
       panel: panel.id,
@@ -172,6 +172,7 @@ async function handlePanelList(env: Env, userId: string, origin: string): Promis
         repoUrl: panel.url,
         port: panel.port,
         extraPorts: panel.extraPorts ?? [],
+        tcpPorts: panelTcpPorts(panel),
         panelPath: panel.panelPath,
         healthPath: panel.healthPath ?? panel.panelPath,
         origin: panel.origin ?? null,
@@ -201,6 +202,16 @@ async function handlePanelHealth(env: Env, userId: string, request: Request): Pr
   const platform = panelPlatformOf(body.platform)
   if (!platform || !body.id) return apiError('پلتفرم و شناسهٔ استقرار الزامی است')
   return json({ data: await probePanelHealth(env, userId, platform, body.id) })
+}
+
+/** Deploy the latest upstream commit for one owned Railway panel. */
+async function handlePanelUpdate(env: Env, userId: string, request: Request): Promise<Response> {
+  const body = safeJsonParse<{ platform?: string; id?: string }>(await request.text().catch(() => ''), {})
+  const platform = panelPlatformOf(body.platform)
+  if (!platform || !body.id) return apiError('پلتفرم و شناسهٔ استقرار الزامی است')
+  const updated = await updatePanelDeploy(env, userId, platform, body.id)
+  if (!updated.ok) return apiError(updated.error, 400)
+  return json({ data: updated })
 }
 
 /** Forget a panel record (the service itself keeps running on the platform). */
@@ -727,6 +738,7 @@ async function handleRouted(
     if (path === '/api/panels' && method === 'GET') return await handlePanelList(env, user.id, origin)
     if (path === '/api/panels/watch' && method === 'POST') return await handlePanelWatch(env, user.id, request)
     if (path === '/api/panels/health' && method === 'POST') return await handlePanelHealth(env, user.id, request)
+    if (path === '/api/panels/update' && method === 'POST') return await handlePanelUpdate(env, user.id, request)
     if (path === '/api/panels/forget' && method === 'POST') return await handlePanelForget(env, user.id, request)
 
     if (path === '/api/deployments' && method === 'GET') return await listDeployments(env, user.id, url)

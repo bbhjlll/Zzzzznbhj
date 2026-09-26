@@ -43,6 +43,35 @@ export interface PanelEnvNames {
   redisUrl?: string
   /** Redis host name. */
   redisHost?: string
+  /** Host adapter name used by the panel (for example NEXUS_PLATFORM). */
+  platform?: string
+  /** Runtime engine master switch (for example XRAY_ENABLED). */
+  engineEnabled?: string
+  /** Optional WARP master switch (for example WARP_ENABLED). */
+  warpEnabled?: string
+  /** Railway project token consumed by the panel's TCP-proxy manager. */
+  railwayToken?: string
+  /** Explicit HTTP port used when Railway's injected PORT names a raw transport. */
+  httpPort?: string
+  /** Direct endpoint host/port for VPS-style deployments. */
+  directHost?: string
+  directPort?: string
+}
+
+/** One raw-TCP capability and the port its listener binds inside the container. */
+export interface PanelTcpPort {
+  port: number
+  label: string
+}
+
+/**
+ * A switch the deployer flips on the panel itself after the first live poll.
+ * `key` is the dotted path inside the panel's save payload
+ * (`{ mtproto: { enabled: '1' } }`, `{ webproxy: { 'web-http': … } }`).
+ */
+export interface PanelCapability {
+  key: string
+  label: string
 }
 
 export interface PanelSpec {
@@ -62,6 +91,20 @@ export interface PanelSpec {
   port: number
   /** Extra container ports (e.g. a separate subscription port). */
   extraPorts?: number[]
+  /**
+   * The raw-TCP capabilities that need a published port of their own, with the
+   * label the dashboard shows. Railway gives each one a random public port
+   * (TCP proxy), a VPS publishes the same numbers directly — so this list is
+   * what every deploy path iterates, never a single "first extra port".
+   */
+  tcpPorts?: PanelTcpPort[]
+  /**
+   * Panel-side switches this deployer turns on itself once the panel answers
+   * (see `key`: the path inside the panel's own save API). They are the
+   * listeners behind {@link PanelSpec.tcpPorts} — without them a published port
+   * forwards to a socket nothing ever binds.
+   */
+  capabilities?: PanelCapability[]
   /** UDP container ports (e.g. WireGuard 51820/udp). */
   udpPorts?: number[]
   /** Whether the project ships a Dockerfile we can build from source. */
@@ -137,9 +180,23 @@ export const PANELS: PanelSpec[] = [
     url: 'https://github.com/miladjahani/Mizetusi',
     runtime: 'docker',
     port: 8080,
-    // 8443 carries the raw-TCP Reality inbound; it is only publishable on a host
-    // with a real TCP port (VPS), so Railway/Render simply skip it.
-    extraPorts: [8443],
+    // Every raw-TCP capability, in the order a client should try them. On a VPS
+    // these numbers are the public ports; on Railway each one needs a TCP proxy
+    // (its public port is random), and Render publishes HTTPS only — so the
+    // list is the single source of truth both paths iterate.
+    extraPorts: [8443, 8446, 8448],
+    tcpPorts: [
+      { port: 8443, label: 'Reality (مسیر مستقیم)' },
+      { port: 8446, label: 'MTProto' },
+      { port: 8448, label: 'وب‌پروکسی HTTP' },
+    ],
+    // The listeners behind those ports are off in a fresh panel by design; the
+    // deployer owns the decision, so it switches them on right after the panel
+    // first answers, and the published ports stop pointing at nothing.
+    capabilities: [
+      { key: 'mtproto', label: 'پروکسی MTProto' },
+      { key: 'webproxy.web-http', label: 'وب‌پروکسی HTTP' },
+    ],
     hasDockerfile: true,
     dockerfilePath: 'Dockerfile',
     panelPath: '/login',
@@ -150,6 +207,13 @@ export const PANELS: PanelSpec[] = [
       port: 'PORT',
       dataDir: 'SQLITE_PATH',
       publicDomain: 'PUBLIC_BASE_URL',
+      platform: 'NEXUS_PLATFORM',
+      engineEnabled: 'XRAY_ENABLED',
+      warpEnabled: 'WARP_ENABLED',
+      railwayToken: 'NEXUS_RAILWAY_TOKEN',
+      httpPort: 'NEXUS_HTTP_PORT',
+      directHost: 'NEXUS_DIRECT_HOST',
+      directPort: 'NEXUS_DIRECT_PORT',
     },
     targets: ['railway', 'render', 'vps'],
     // The image builds xray-core from the official xtls image itself, so nothing
@@ -165,9 +229,9 @@ export const PANELS: PanelSpec[] = [
     dataFile: '/data/nexus.db',
     capAdd: ['NET_ADMIN'],
     notes:
-      'رمز ادمین هنگام استقرار ساخته و یک‌بار نمایش داده می‌شود (پیش‌فرض خودِ پنل admin/admin است — همان اول عوضش کنید). دیتابیس SQLite در /data است، پس روی Railway/Render یک Volume روی /data بگذارید وگرنه با هر ری‌دیپلوی پاک می‌شود. Reality فقط وقتی منتشر می‌شود که هاست یک پورت TCP واقعی داشته باشد (VPS: 8443، یا TCP Proxy ریلوی). CAP NET_ADMIN فقط برای خروج اختیاری WARP در compose تنظیم شده است.',
-    lastCommit: '2026-09-21',
-    verifiedAt: '2026-09-21',
+      'رمز ادمین هنگام استقرار ساخته و یک‌بار نمایش داده می‌شود (پیش‌فرض خودِ پنل admin/admin است — همان اول عوضش کنید). دیتابیس SQLite در /data است، پس روی Railway/Render یک Volume روی /data بگذارید وگرنه با هر ری‌دیپلوی پاک می‌شود. سه پورت خام ۸۴۴۳ (Reality)، ۸۴۴۶ (MTProto) و ۸۴۴۸ (وب‌پروکسی HTTP) منتشر می‌شوند: روی VPS همین شماره‌ها عمومی‌اند و روی Railway هرکدام یک TCP Proxy با پورت تصادفی می‌گیرند که در کارت پنل نمایش داده می‌شود. سوییچ MTProto و وب‌پروکسی HTTP خودکار روشن می‌شوند. روی Render فقط پورت HTTPS منتشر می‌شود، پس این سه پورت آنجا در دسترس نیستند. CAP NET_ADMIN فقط برای خروج اختیاری WARP در compose تنظیم شده است.',
+    lastCommit: '2026-09-25',
+    verifiedAt: '2026-09-25',
   },
 ]
 
@@ -252,6 +316,80 @@ export function panelDataFile(panel: PanelSpec): string {
 
 export function panelRepoUrl(panel: PanelSpec): string {
   return `https://github.com/${panel.repo}.git`
+}
+
+/**
+ * Every raw-TCP capability a deploy path has to publish, with its label.
+ * Panels that only declared bare `extraPorts` still get one entry each, so an
+ * older catalog entry cannot silently lose its Reality port.
+ */
+export function panelTcpPorts(panel: PanelSpec): PanelTcpPort[] {
+  if (panel.tcpPorts?.length) return panel.tcpPorts
+  return (panel.extraPorts ?? []).map((port) => ({ port, label: `TCP ${port}` }))
+}
+
+/** Generated and user-specific values used to build a deployment manifest. */
+export interface PanelDeploySecrets {
+  adminPassword: string
+  secretKey: string
+  /** Railway project token, created once after the project/environment exist. */
+  railwayToken?: string
+  /** Public HTTPS origin, when the platform has generated it already. */
+  publicBaseUrl?: string
+  /** Direct host exposed by a VPS deployment, if the user supplied one. */
+  directHost?: string
+}
+
+export interface PanelDeployEnvEntry {
+  name: string
+  value: string
+  /** Never include the value in an API response or generated README. */
+  secret: boolean
+}
+
+/**
+ * Complete deploy-time environment for a panel.
+ *
+ * Every automated and generated deployment path consumes this function, so the
+ * Railway, Render and VPS flows cannot silently drift apart. Static switches are
+ * derived from the catalog; passwords, signing keys, state paths and platform
+ * tokens are filled from the per-deploy values.
+ */
+export function buildPanelDeployEnv(
+  panel: PanelSpec,
+  platform: DeployTarget,
+  values: PanelDeploySecrets,
+): PanelDeployEnvEntry[] {
+  const entries: PanelDeployEnvEntry[] = []
+  const add = (name: string | undefined, value: string | undefined, secret = false) => {
+    if (name && value !== undefined) entries.push({ name, value, secret })
+  }
+
+  add(panel.env.adminPassword, values.adminPassword, true)
+  add(panel.env.secretKey, values.secretKey, true)
+  add(panel.env.dataDir, panelDataFile(panel))
+  add(panel.env.platform, platform)
+  add(panel.env.engineEnabled, 'true')
+  add(panel.env.warpEnabled, 'false')
+
+  if (platform === 'railway') {
+    // A TCP proxy makes Railway inject the proxy target as PORT. Pin both names to
+    // the HTTP edge so uvicorn and Xray never contend for the same listener.
+    add(panel.env.port, String(panel.port))
+    add(panel.env.httpPort, String(panel.port))
+    add(panel.env.publicDomain, values.publicBaseUrl)
+    add(panel.env.railwayToken, values.railwayToken, true)
+  } else if (platform === 'render') {
+    // Render injects PORT and RENDER_EXTERNAL_URL itself.
+    add(panel.env.publicDomain, values.publicBaseUrl)
+  } else {
+    add(panel.env.port, String(panel.port))
+    add(panel.env.publicDomain, values.publicBaseUrl)
+    add(panel.env.directHost, values.directHost ?? '')
+    add(panel.env.directPort, panel.extraPorts?.[0] ? String(panel.extraPorts[0]) : '')
+  }
+
+  return entries
 }
 
 /** Verified-liveness badge text, e.g. "بررسی‌شده ۲۰۲۶-۰۹-۱۲". */

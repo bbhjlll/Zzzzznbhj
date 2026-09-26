@@ -10,7 +10,7 @@
  *   → env vars + start command → serviceInstanceDeployV2 → poll until SUCCESS
  */
 
-import { panelDataDir, panelDataFile, type PanelSpec } from '../shared/panels'
+import { buildPanelDeployEnv, panelDataDir, panelTcpPorts, type PanelSpec } from '../shared/panels'
 
 export class RailwayApiError extends Error {
   /**
@@ -50,6 +50,9 @@ type Headers = Record<string, string>
 const bearerHeaders = (token: string): Headers => ({
   'Content-Type': 'application/json',
   Authorization: `Bearer ${token}`,
+  // Account/workspace tokens use Authorization; project tokens use this header.
+  // Railway ignores the other header, so one helper safely supports both.
+  'Project-Access-Token': token,
 })
 /** Project/Environment tokens authenticate with their own header (Railway docs). */
 const projectHeaders = (token: string): Headers => ({
@@ -100,6 +103,17 @@ async function gqlOnce(
         'توکن Railway نامعتبر است یا دسترسی کافی ندارد — ابتدا یک‌بار دیگر تلاش کنید و اگر باز هم رد شد، از railway.com/account/tokens یک توکن «Account» بسازید',
         true,
       )
+    }
+    // Two account-level refusals users actually hit, with the same English
+    // phrasing Railway returns. Their own words are unhelpful on a phone, so
+    // each becomes an actionable Persian message.
+    if (msgs.some((m) => /provision limit|resource limit|upgrade to provision/i.test(m))) {
+      throw new RailwayApiError(
+        'سهمیهٔ منابع پلن Railway شما پر شده — یک پروژهٔ بی‌استفاده را در داشبورد حذف کنید (یا پلن را ارتقا دهید) و دوباره تلاش کنید',
+      )
+    }
+    if (msgs.some((m) => /too quickly|per \d+ seconds/i.test(m))) {
+      throw new RailwayApiError('Railway اجازه می‌دهد هر ۳۰ ثانیه یک پروژه ساخته شود — نیم دقیقه صبر کنید و دوباره تلاش کنید')
     }
     throw new RailwayApiError(msgs.join(' — ') || 'خطای Railway API')
   }
@@ -163,11 +177,28 @@ export async function verifyRailwayToken(token: string): Promise<{ name: string;
   }
 }
 
+export interface RailwayTcpProxy {
+  id: string
+  domain: string
+  proxyPort: number
+  applicationPort: number
+  /** Which capability this proxy fronts (Reality, MTProto, HTTP …). */
+  label?: string
+}
+
 export interface RailwayDeployResult {
   projectId: string
   serviceId: string
   environmentId: string
   deploymentId: string
+  commitSha: string
+  commitUrl: string
+  projectToken?: string | null
+  /** First (direct) proxy — kept for the single-proxy card fields. */
+  tcpProxy?: RailwayTcpProxy | null
+  /** Every capability that got its own proxy, in catalog order. */
+  tcpProxies?: RailwayTcpProxy[]
+  tcpProxyError?: string | null
   projectUrl: string
   domain?: string | null
 }
@@ -179,6 +210,24 @@ export interface PanelDeployEnv {
 }
 
 interface EnvEdge { node?: { id?: string; name?: string } }
+
+/** Latest commit that should be deployed for a connected GitHub branch. */
+async function latestPanelCommit(panel: PanelSpec, branch = 'main'): Promise<{ sha: string; url: string }> {
+  let response: Response
+  try {
+    response = await fetch(`https://api.github.com/repos/${panel.repo}/commits/${encodeURIComponent(branch)}`, {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'miliconfig-panel-deployer' },
+    })
+  } catch {
+    throw new RailwayApiError('آخرین نسخهٔ مخزن پنل از GitHub دریافت نشد — اتصال اینترنت را بررسی و دوباره تلاش کنید')
+  }
+  if (!response.ok) {
+    throw new RailwayApiError(`دریافت آخرین نسخهٔ ${panel.name} از GitHub ناموفق بود (HTTP ${response.status})`)
+  }
+  const data = await response.json().catch(() => null) as { sha?: string; html_url?: string } | null
+  if (!data?.sha) throw new RailwayApiError(`آخرین commit شاخهٔ ${branch} در ${panel.repo} پیدا نشد`)
+  return { sha: data.sha, url: data.html_url ?? `https://github.com/${panel.repo}/commit/${data.sha}` }
+}
 
 /**
  * Create a Railway project from a catalog panel repo and trigger a deploy.
@@ -253,6 +302,14 @@ export async function deployToRailway(
     )
   }
 
+  // 3a. Suppress source-triggered builds while variables, token and TCP proxy
+  //     are attached. The single explicit deployment below uses the latest HEAD.
+  await gql(
+    token,
+    'mutation ($input: ServiceInstanceAutoDeployUpdateInput!) { serviceInstanceAutoDeployUpdate(input: $input) { enabled } }',
+    { input: { projectId, serviceId, environmentId, enabled: false } },
+  ).catch(() => null)
+
   // 3b. Pin the deployment region (and, for non-Docker panels, the build/start
   //     commands Nixpacks needs) before the first deploy.
   const instanceInput: Record<string, unknown> = { region }
@@ -292,20 +349,63 @@ export async function deployToRailway(
     ).catch(() => null)
   }
 
-  // 4. Set the panel's env vars so it starts configured on first boot
-  //    (PORT + the generated admin credentials, when the panel understands them).
-  const envVars: Array<[string, string]> = []
-  if (panel.env.port) envVars.push([panel.env.port, String(panel.port)])
-  if (panel.env.adminPassword) envVars.push([panel.env.adminPassword, values.adminPassword])
-  if (panel.env.secretKey) envVars.push([panel.env.secretKey, values.secretKey])
-  // The panel wants the *file* inside the volume: pointing SQLITE_PATH at the
-  // mount directory itself crashes the app on boot ("unable to open database
-  // file"), which is exactly how a live Railway deploy failed before this.
-  if (panel.env.dataDir) envVars.push([panel.env.dataDir, panelDataFile(panel)])
+  // 3e. Create a project-scoped token for this deployment. The panel receives
+  //     it as NEXUS_RAILWAY_TOKEN and can then create/update its own TCP proxies
+  //     without retaining the user's broad Account token.
+  let projectToken: string | null = null
+  try {
+    const tokenData = await gql(
+      token,
+      'mutation ($input: ProjectTokenCreateInput!) { projectTokenCreate(input: $input) }',
+      { input: { projectId, environmentId, name: `${projectName} panel manager` } },
+    )
+    projectToken = typeof tokenData.projectTokenCreate === 'string' ? tokenData.projectTokenCreate : null
+  } catch {
+    /* web deployment continues with the account token as a fallback */
+  }
+
+  // 3f. Publish every declared raw-TCP capability (Reality, MTProto and the HTTP
+  //     web proxy on Mizetusi). Railway gives each one a random public port, so
+  //     a card that published only the first would hand out two links that
+  //     answer nothing. The API requires one redeploy after creation; the
+  //     explicit deployment below provides it. A failure is non-fatal per
+  //     capability — the HTTPS panel still boots and the rest still publish.
+  const tcpProxies: RailwayTcpProxy[] = []
+  const tcpErrors: string[] = []
+  for (const capability of panelTcpPorts(panel)) {
+    try {
+      const proxyData = await gql(
+        token,
+        'mutation ($input: TCPProxyCreateInput!) { tcpProxyCreate(input: $input) { id domain proxyPort applicationPort } }',
+        { input: { environmentId, serviceId, applicationPort: capability.port } },
+      )
+      const item = proxyData.tcpProxyCreate as Partial<RailwayTcpProxy> | undefined
+      if (item?.id && item.domain && item.proxyPort) {
+        tcpProxies.push({ ...(item as RailwayTcpProxy), label: capability.label })
+      } else {
+        tcpErrors.push(`${capability.label}: Railway پروکسی TCP را بدون آدرس کامل برگرداند`)
+      }
+    } catch (err) {
+      const reason = err instanceof RailwayApiError ? err.message : 'ساخت پروکسی TCP در Railway ناموفق بود'
+      tcpErrors.push(`${capability.label}: ${reason}`)
+    }
+  }
+  const tcpProxy = tcpProxies[0] ?? null
+  const tcpProxyError = tcpErrors.length ? tcpErrors.join(' · ') : null
+
+  // 4. Apply the shared, complete panel manifest. This includes generated admin
+  //    credentials, JWT signing key, state file, platform/runtime switches,
+  //    public URL and the project-scoped Railway token.
+  const envVars = buildPanelDeployEnv(panel, 'railway', {
+    ...values,
+    railwayToken: projectToken ?? undefined,
+    publicBaseUrl: domain ? `https://${domain}` : undefined,
+  })
   // Only when a volume is attached: the container needs to own the root-owned
   // mount, and images that run as an unprivileged user otherwise cannot.
-  if (panel.env.dataDir) envVars.push([RUN_AS_ROOT_VAR, '0'])
-  for (const [name, value] of envVars) {
+  if (panel.env.dataDir) envVars.push({ name: RUN_AS_ROOT_VAR, value: '0', secret: false })
+  const uniqueEnvVars = [...new Map(envVars.map((item) => [item.name, item])).values()]
+  for (const { name, value } of uniqueEnvVars) {
     // `skipDeploys` matters: every variable write otherwise starts its own
     // deployment, so a panel would build three or four times in a row (wasting
     // build minutes and flapping the service) before the real deploy below.
@@ -316,16 +416,66 @@ export async function deployToRailway(
     ).catch(() => null)
   }
 
-  // 5. Trigger the deploy. Returns the deployment id (string).
+  // 5. Fetch the newest main commit and deploy exactly that revision. This is
+  //    deliberately not serviceInstanceRedeploy, which reuses an older SHA.
+  const latest = await latestPanelCommit(panel)
+
+  // Turn automatic GitHub deploys back on only after every setting is in place.
+  // Future pushes to the connected branch now update this panel without any
+  // action from miliconfig.
+  await gql(
+    token,
+    'mutation ($input: ServiceInstanceAutoDeployUpdateInput!) { serviceInstanceAutoDeployUpdate(input: $input) { enabled } }',
+    { input: { projectId, serviceId, environmentId, enabled: true } },
+  )
+
   const dep = await gql(
     token,
-    'mutation ($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }',
-    { serviceId, environmentId },
+    'mutation ($serviceId: String!, $environmentId: String!, $commitSha: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }',
+    { serviceId, environmentId, commitSha: latest.sha },
   )
   const deploymentId = dep.serviceInstanceDeployV2 as string | undefined
-  if (!deploymentId) throw new RailwayApiError('دستور استقرار روی Railway اجرا نشد')
+  if (!deploymentId) throw new RailwayApiError('دستور استقرار آخرین نسخه روی Railway اجرا نشد')
 
-  return { projectId, serviceId, environmentId, deploymentId, projectUrl: `https://railway.com/project/${projectId}`, domain }
+  return {
+    projectId,
+    serviceId,
+    environmentId,
+    deploymentId,
+    commitSha: latest.sha,
+    commitUrl: latest.url,
+    projectToken,
+    tcpProxy,
+    tcpProxies,
+    tcpProxyError,
+    projectUrl: `https://railway.com/project/${projectId}`,
+    domain,
+  }
+}
+
+/** Deploy the newest commit of a connected panel branch on an existing service. */
+export async function updateRailwayPanel(
+  token: string,
+  projectId: string,
+  serviceId: string,
+  environmentId: string,
+  panel: PanelSpec,
+  branch = 'main',
+): Promise<{ deploymentId: string; commitSha: string; commitUrl: string }> {
+  const latest = await latestPanelCommit(panel, branch)
+  await gql(
+    token,
+    'mutation ($input: ServiceInstanceAutoDeployUpdateInput!) { serviceInstanceAutoDeployUpdate(input: $input) { enabled } }',
+    { input: { projectId, serviceId, environmentId, enabled: true } },
+  )
+  const data = await gql(
+    token,
+    'mutation ($serviceId: String!, $environmentId: String!, $commitSha: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }',
+    { serviceId, environmentId, commitSha: latest.sha },
+  )
+  const deploymentId = data.serviceInstanceDeployV2 as string | undefined
+  if (!deploymentId) throw new RailwayApiError('استقرار آخرین نسخه روی Railway آغاز نشد')
+  return { deploymentId, commitSha: latest.sha, commitUrl: latest.url }
 }
 
 /** Poll the status of a deployment started with deployToRailway. */

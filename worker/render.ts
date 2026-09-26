@@ -14,7 +14,7 @@
  *   GET  /v1/deploys/{id} → status (created → build_in_progress → live)
  */
 
-import { panelDataFile, type PanelSpec } from '../shared/panels'
+import { buildPanelDeployEnv, type PanelSpec } from '../shared/panels'
 
 export class RenderApiError extends Error {
   constructor(message: string) {
@@ -115,10 +115,11 @@ function buildRenderYaml(name: string, panel: PanelSpec, values: PanelDeployEnv)
 
   if (panel.runtime === 'docker') {
     lines.push(
-      '    env: docker',
-      '    plan: free',
+      '    runtime: docker',
+      '    plan: starter',
       `    repo: https://github.com/${panel.repo}`,
       `    dockerfilePath: ${panel.dockerfilePath ?? 'Dockerfile'}`,
+      `    healthCheckPath: ${panel.healthPath ?? panel.panelPath}`,
     )
   } else {
     lines.push(
@@ -133,20 +134,19 @@ function buildRenderYaml(name: string, panel: PanelSpec, values: PanelDeployEnv)
   }
 
 
-  const envVars: Array<[string, string]> = []
-  if (panel.env.port) envVars.push([panel.env.port, String(panel.port)])
-  if (panel.env.adminPassword) envVars.push([panel.env.adminPassword, values.adminPassword])
-  if (panel.env.secretKey) envVars.push([panel.env.secretKey, values.secretKey])
-  // A file inside the disk, never the disk's mount path itself — panels open
-  // this value with sqlite3, which cannot open a directory.
-  if (panel.env.dataDir) envVars.push([panel.env.dataDir, panelDataFile(panel)])
-
+  const envVars = buildPanelDeployEnv(panel, 'render', values)
   if (envVars.length) {
     lines.push('    envVars:')
-    for (const [key, value] of envVars) {
-      lines.push(`      - key: ${key}`)
-      lines.push(`        value: "${value}"`)
+    for (const { name, value } of envVars) {
+      lines.push(`      - key: ${name}`)
+      lines.push(`        value: "${value.replaceAll('"', '\\"')}"`)
     }
+  }
+  if (panel.dataVolume) {
+    lines.push('    disk:')
+    lines.push(`      name: ${name}-data`)
+    lines.push(`      mountPath: ${panel.dataVolume}`)
+    lines.push('      sizeGB: 1')
   }
   lines.push('    autoDeploy: true')
   lines.push('')

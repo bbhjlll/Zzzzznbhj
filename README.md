@@ -152,7 +152,7 @@ shared/panels.ts
 
 | پنل | مخزن | جامعه | نوع اجرا | مسیر پنل | پورت | هدف‌ها |
 |---|---|---|---|---|---|---|
-| **پنل اختصاصی ما** (NEXUS / Mizetusi) | `miladjahani/Mizetusi` | 🇮🇷 | Docker (FastAPI + Xray-core) | `/login` | 8080 (+8443/tcp) | Railway · Render · VPS |
+| **پنل اختصاصی ما** (NEXUS / Mizetusi) | `miladjahani/Mizetusi` | 🇮🇷 | Docker (FastAPI + Xray-core) | `/login` | 8080 (+8443/8446/8448 tcp) | Railway · Render · VPS |
 
 حذف‌شده‌ها در `REMOVED_PANELS` (با دلیل) ثبت شده‌اند: `youdidking/stanngv2`، `iran-px-panel/pxpanel`، `MHSanaei/3x-ui`، `alireza0/s-ui`، `PasarGuard/panel`، `luffy-sh-op/LUFFY_PANEL`، `wg-easy/wg-easy`، `remnawave/backend`.
 
@@ -172,11 +172,13 @@ shared/panels.ts
 
 برای هر پنل، ویزارد استقرار از این سه روش پشتیبانی می‌کند:
 
-1. **Railway (خودکار)** — پروژه ساخته می‌شود، مخزن به‌عنوان سرویس متصل، متغیرهای محیطی (`ADMIN_PASSWORD`، `SECRET_KEY`، `PORT` و...) ست و دیپلوی اجرا می‌شود.
-2. **Render.com (خودکار)** — یک Blueprint (render.yaml) ساخته می‌شود؛ برای پنل داکری `env: docker` و برای پنل پایتونی `env: python` با build/start command مناسب.
+1. **Railway (خودکار)** — پروژه، محیط production، سرویس متصل به GitHub، دامنه و Volume ساخته می‌شوند؛ یک **Project Token** محدود به همان پروژه صادر و متغیرهای کامل Mizetusi (`ADMIN_PASSWORD`، `JWT_SECRET`، `SQLITE_PATH`، `NEXUS_PLATFORM`، `XRAY_ENABLED`، `WARP_ENABLED`، `PORT`، `NEXUS_HTTP_PORT`، `PUBLIC_BASE_URL` و `NEXUS_RAILWAY_TOKEN`) ست می‌شوند. سپس **سه TCP Proxy** روی پورت‌های داخلی `8443` (Reality)، `8446` (MTProto) و `8448` (وب‌پروکسی HTTP) ساخته، Auto Deploy شاخه `main` فعال و **آخرین commit مخزن** با SHA دقیق مستقر می‌شود.
+2. **Render.com (خودکار)** — یک Blueprint با همان مانیفست تنظیمات، Docker runtime و دیسک ماندگار `/data` ساخته می‌شود؛ Render خودش `PORT` و دامنه عمومی را تزریق می‌کند.
 3. **VPS (Docker)** — بستهٔ ZIP شامل `docker-compose.yml`، `nginx.conf`، `.env`، `deploy.sh` و `README.md` دانلود می‌شود. برای پنل‌های پایتونی `Dockerfile` هم ساخته می‌شود؛ پنل‌های دارای ایمیج رسمی مستقیم از همان ایمیج بالا می‌آیند و در صورت نیاز، سرویس‌های **PostgreSQL** و **Redis** خودکار به compose اضافه می‌شوند.
 
-> رمز ادمین و کلید سشن در هر استقرار به‌صورت تصادفی ساخته می‌شوند و در متغیرهای محیطی همان سرویس قرار می‌گیرند؛ فقط یک‌بار پس از استقرار نمایش داده می‌شوند.
+> در Mizetusi، سوییچ‌های داخلی پنل برای قابلیت‌های پورت خام هم در هر استقرار تازه روشن می‌شوند: پس از اولین poll موفق، `POST /api/telegram` با هدر `x-admin-password` قابلیت‌های `mtproto` و `webproxy.web-http` را فعال می‌کند تا هر سه لیسنر `8443`/`8446`/`8448` واقعاً bind شوند. اگر پنل هنوز آماده نباشد، خطا به‌صورت یک هشدار در کارت پنل نشان داده می‌شود و استقرار شکست نمی‌خورد. پروکسی WEB تلگرام (`tg://webproxy`) روی دامنه HTTPS و WebSocket خودِ پنل کار می‌کند و به TCP Proxy جداگانه نیاز ندارد.
+
+> رمز ادمین، کلید سشن و Project Token در هر استقرار به‌صورت تصادفی ساخته می‌شوند و در متغیرهای محیطی همان سرویس قرار می‌گیرند؛ رمز ادمین فقط یک‌بار در رابط کاربری نمایش داده می‌شود و Project Token هرگز به مرورگر برگردانده نمی‌شود. پس از ساخت، هر push جدید روی `main` به‌صورت خودکار منتشر می‌شود؛ دکمهٔ «استقرار آخرین نسخه» و endpoint `POST /api/panels/update` نیز آخرین commit را فوراً روی همان سرویس اجرا می‌کنند.
 
 **افزودن پنل جدید:** یک ورودی به آرایهٔ `PANELS` در `shared/panels.ts` اضافه کنید (مخزن، نوع اجرا، پورت، مسیر پنل و نام متغیرهای محیطی). نیازی به تغییر جای دیگری از کد نیست.
 
