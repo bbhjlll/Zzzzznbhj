@@ -24,7 +24,10 @@ const calls: Call[] = []
 globalThis.fetch = (async (url: any, init: any) => {
   const method = String(url).split('/').pop() ?? ''
   calls.push({ method, body: init?.body ? JSON.parse(init.body) : {} })
-  return new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), {
+  // The forced-membership gate checks getChatMember on every update; this user
+  // has already joined, so the screens stay reachable.
+  const result = method === 'getChatMember' ? { status: 'member' } : { message_id: 42 }
+  return new Response(JSON.stringify({ ok: true, result }), {
     headers: { 'Content-Type': 'application/json' },
   })
 }) as typeof fetch

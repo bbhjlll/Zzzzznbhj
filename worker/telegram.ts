@@ -1,8 +1,10 @@
 import type { Env } from './env'
-import { replyKeyboard, routeCallback, routeText } from './telegram-ui'
+import { joinRequiredScreen, replyKeyboard, routeCallback, routeText } from './telegram-ui'
 import {
   answerCb,
+  FORCE_JOIN_CALLBACK,
   isBotUserBlocked,
+  isChannelMember,
   loadSession,
   notifyDeployment,
   notifyOptimizer,
@@ -142,6 +144,20 @@ export async function handleTelegramWebhook(
     return jsonOk()
   }
 
+  // ── Forced channel membership ────────────────────────────────────────────
+  // Before anything else: the user must be a member of @miliconfig. The only
+  // exception is the gate's own "✅ عضو شدم" button, which re-checks live below
+  // (so the check can never be skipped by typing a command) and unlocks the menu
+  // once it passes.
+  const member = await isChannelMember(bt, telegramId)
+  const isJoinCheck = update.callback_query?.data === FORCE_JOIN_CALLBACK
+  if (!member && !isJoinCheck) {
+    if (update.callback_query) ctx.waitUntil(answerCb(bt, update.callback_query.id).catch(() => null))
+    const gateMessageId = update.callback_query?.message?.message_id ?? null
+    ctx.waitUntil(renderScreen(bt, chatId, gateMessageId, joinRequiredScreen()).catch(() => null))
+    return jsonOk()
+  }
+
   const botCfg = scopeToTenant(cfg, tenant)
   const shared = {
     env,
@@ -158,11 +174,28 @@ export async function handleTelegramWebhook(
   if (update.callback_query) {
     const cq = update.callback_query
     const messageId = cq.message?.message_id ?? null
-    ctx.waitUntil(answerCb(bt, cq.id).catch(() => null))
+    // The join gate answers its own press (with a result toast), so it is not
+    // acknowledged twice here.
+    if (cq.data !== FORCE_JOIN_CALLBACK) ctx.waitUntil(answerCb(bt, cq.id).catch(() => null))
     ctx.waitUntil(
       (async () => {
         try {
           const session = await loadSession(env, tenant.user_id, telegramId)
+          // "✅ عضو شدم": `member` above already re-ran the live check. When it
+          // passed, unlock the menu (and install the tab keyboard); otherwise
+          // keep the gate up and tell the user why.
+          if (cq.data === FORCE_JOIN_CALLBACK) {
+            if (!member) {
+              await answerCb(bt, cq.id, '❌ هنوز عضو کانال نشده‌اید.').catch(() => null)
+              await renderScreen(bt, chatId, messageId, joinRequiredScreen())
+              return
+            }
+            await answerCb(bt, cq.id, '✅ عضویت تأیید شد').catch(() => null)
+            await installTabKeyboard(bt, chatId)
+            const unlocked = await routeCallback({ ...shared, chatId, session, data: 'n:menu' })
+            if (unlocked) await renderScreen(bt, chatId, messageId, unlocked)
+            return
+          }
           const screen = await routeCallback({
             ...shared,
             chatId,

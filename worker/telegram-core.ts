@@ -334,6 +334,40 @@ export async function isBotUserBlocked(env: Env, ownerUserId: string, telegramId
   return !!row && !row.is_active
 }
 
+// ── Forced channel membership ────────────────────────────────────────────────
+
+/** Channel every user must join before the bot unlocks (without the `@`). */
+export const FORCE_JOIN_CHANNEL = 'miliconfig'
+/** Public link to that channel. */
+export const FORCE_JOIN_URL = `https://t.me/${FORCE_JOIN_CHANNEL}`
+/** Callback payload of the gate's "I joined" button. */
+export const FORCE_JOIN_CALLBACK = 'join:check'
+
+/**
+ * Is this Telegram user a member of the required channel?
+ *
+ * Telegram only answers `getChatMember` when the bot is an **administrator of
+ * the channel**; without that right the API returns an error. Such an error is
+ * treated as "member" (fail open) so a misconfigured bot can never lock every
+ * user out — enforcement simply resumes once the bot is promoted to admin.
+ * Only an explicit `left`/`kicked` status blocks.
+ */
+export async function isChannelMember(token: string, telegramId: string): Promise<boolean> {
+  const res = await tg<{ status?: string; is_member?: boolean }>(token, 'getChatMember', {
+    chat_id: `@${FORCE_JOIN_CHANNEL}`,
+    user_id: Number(telegramId),
+  })
+  if (!res.ok) {
+    console.warn(`force-join: getChatMember failed (${res.description ?? 'unknown'}) — is the bot an admin of @${FORCE_JOIN_CHANNEL}?`)
+    return true
+  }
+  const status = res.result?.status ?? ''
+  if (status === 'creator' || status === 'administrator' || status === 'member') return true
+  // A restricted user counts as a member while `is_member` is not explicitly false.
+  if (status === 'restricted') return res.result?.is_member !== false
+  return false
+}
+
 /**
  * Where a deployment's result notification should go.
  *

@@ -17,7 +17,7 @@ import {
 } from './bot-tokens'
 import {
   type BotConfigRow, type BotSession, type BotTenant, type Screen, type ScreenCtx, type TgButton,
-  clearSession, faDate, loadSession, saveSession, sendMsg, statusIcon, subUrlOf, tenantByToken,
+  clearSession, faDate, FORCE_JOIN_CHANNEL, FORCE_JOIN_URL, loadSession, saveSession, sendMsg, statusIcon, subUrlOf, tenantByToken,
 } from './telegram-core'
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -67,6 +67,29 @@ export function replyKeyboard(): Record<string, unknown> {
 
 const homeButton = (): TgButton => ({ text: '🏠 منوی اصلی', callback_data: 'n:menu' })
 const backButton = (target: string, label = '🔙 بازگشت'): TgButton => ({ text: label, callback_data: target })
+
+/**
+ * The forced-membership gate shown before any bot feature is reachable.
+ *
+ * The only way past it is the "✅ عضو شدم" button, which re-runs the live
+ * `getChatMember` check (see `handleTelegramWebhook`) — a user cannot dismiss it
+ * by typing anything, so the channel join really is a precondition.
+ */
+export function joinRequiredScreen(): Screen {
+  return {
+    text:
+      '🔒 <b>عضویت اجباری در کانال</b>\n\n' +
+      'برای استفاده از ربات ابتدا باید در کانال زیر عضو شوید:\n\n' +
+      `📢 <a href="${FORCE_JOIN_URL}">@${FORCE_JOIN_CHANNEL}</a>\n\n` +
+      'بعد از عضویت، دکمهٔ «✅ عضو شدم» را بزنید تا امکانات ربات باز شود.',
+    keyboard: {
+      inline_keyboard: [
+        [{ text: '📢 عضویت در کانال', url: FORCE_JOIN_URL }],
+        [{ text: '✅ عضو شدم', callback_data: 'join:check' }],
+      ],
+    },
+  }
+}
 
 function paginate<T>(rows: T[], page: number): { slice: T[]; pages: number; page: number } {
   const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE))

@@ -28,7 +28,12 @@ globalThis.fetch = (async (url: any, init: any) => {
   const body = init?.body && typeof init.body === 'string' ? JSON.parse(init.body) : {}
   calls.push({ method: u.split('/').pop() ?? '', url: u, body })
   const json = (payload: unknown) => new Response(JSON.stringify(payload), { headers: { 'Content-Type': 'application/json' } })
-  if (u.includes('api.telegram.org')) return json({ ok: true, result: { message_id: 42 } })
+  if (u.includes('api.telegram.org')) {
+    // The forced-membership gate calls getChatMember first; these users are
+    // members, so every screen below stays reachable.
+    if (u.endsWith('/getChatMember')) return json({ ok: true, result: { status: 'member' } })
+    return json({ ok: true, result: { message_id: 42 } })
+  }
   if (u.includes('api.cloudflare.com')) {
     if (u.includes('/verify')) return json({ success: true, result: { id: 'cf-id-1', status: 'active' } })
     if (u.includes('/user/tokens/')) return json({ success: true, result: { name: 'Cloudflare Token A' } })
