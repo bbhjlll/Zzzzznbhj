@@ -1,9 +1,16 @@
 import type { Env } from './env'
 import { genId, nowIso, safeJsonParse } from './util'
-import { PANELS, panelsForTarget, panelOriginLabel, panelVerifiedLabel, railwayRegionLabel, resolvePanel } from '../shared/panels'
+import { PANELS, panelsForTarget, panelOriginLabel, panelVerifiedLabel, RAILWAY_REGIONS, railwayRegionLabel, resolvePanel } from '../shared/panels'
 import { autoWorkerSources } from '../shared/worker-sources'
 import { startDeployment } from './deploy'
-import { startPanelDeploy, watchPanelDeploy, type PanelWatchResult, type StartPanelDeployResult } from './panel-deploy'
+import {
+  startPanelDeploy,
+  updatePanelSettings,
+  watchPanelDeploy,
+  type PanelSettingsPatch,
+  type PanelWatchResult,
+  type StartPanelDeployResult,
+} from './panel-deploy'
 import {
   deleteTokenRow,
   findToken,
@@ -323,6 +330,8 @@ interface ServerItem {
   base: string | null
   path: string
   admin: string | null
+  /** Callback that opens this deployment's service-settings screen (Railway). */
+  settings?: string
 }
 
 export async function serversScreen(ctx: ScreenCtx, page: number): Promise<Screen> {
@@ -347,6 +356,7 @@ export async function serversScreen(ctx: ScreenCtx, page: number): Promise<Scree
       base: r.domain ? `https://${r.domain}` : null,
       path: panel.panelPath,
       admin: r.admin_username,
+      settings: `srvset:o:${r.id}`,
     })
   }
   for (const r of renders.results) {
@@ -376,15 +386,72 @@ export async function serversScreen(ctx: ScreenCtx, page: number): Promise<Scree
     if (s.admin) text += `👤 ادمین: <code>${s.admin}</code>\n`
     if (s.base) {
       text += `🔐 <code>${s.base}${s.path}</code>\n\n`
-      keyboard.push([{ text: `🔐 پنل ${s.panelName}`, url: `${s.base}${s.path}` }])
+      const row: TgButton[] = [{ text: `🔐 پنل ${s.panelName}`, url: `${s.base}${s.path}` }]
+      if (s.settings) row.push({ text: '⚙️ تنظیمات', callback_data: s.settings })
+      keyboard.push(row)
     } else {
       text += '⏳ دامنهٔ عمومی هنوز فعال نشده\n\n'
+      if (s.settings) keyboard.push([{ text: '⚙️ تنظیمات سرویس', callback_data: s.settings }])
     }
   }
   const pager = pagerRow('servers', current, pages)
   if (pager) keyboard.push(pager)
   keyboard.push([homeButton()])
   return { text, keyboard: { inline_keyboard: keyboard } }
+}
+
+/**
+ * Service settings for one Railway deployment — the same knobs the Railway
+ * dashboard exposes (region, Serverless, outbound IPv6, CDN caching).
+ *
+ * Every button applies its change immediately (see the `srvset` handler) and
+ * this screen re-renders from the record the engine just updated, so it can
+ * never show a setting the platform refused.
+ */
+async function serverSettingsScreen(env: Env, userId: string, deployId: string): Promise<Screen> {
+  const row = await env.DB.prepare(
+    'SELECT id, name, panel, region, sleep_application, ipv6_egress, cdn_enabled FROM railway_deploys WHERE id = ? AND user_id = ?',
+  )
+    .bind(deployId, userId)
+    .first<{
+      id: string
+      name: string | null
+      panel: string | null
+      region: string | null
+      sleep_application: number | null
+      ipv6_egress: number | null
+      cdn_enabled: number | null
+    }>()
+  if (!row) {
+    return {
+      text: '❌ این سرور در فهرست شما نیست.',
+      keyboard: { inline_keyboard: [[{ text: '🖥 سرورها', callback_data: 'l:servers:0' }], [homeButton()]] },
+    }
+  }
+  const panel = resolvePanel(row.panel)
+  const state = (v: number | null) => (v ? '🟢 روشن' : '⚪️ خاموش')
+
+  const text =
+    '⚙️ <b>تنظیمات سرویس</b>\n\n' +
+    `🧩 ${panel.name}\n` +
+    `📦 <code>${row.name ?? deployId}</code>\n\n` +
+    `📍 منطقه: <b>${railwayRegionLabel(row.region)}</b>\n` +
+    `💤 Serverless: ${state(row.sleep_application)}\n` +
+    `🌐 Outbound IPv6: ${state(row.ipv6_egress)}\n` +
+    `⚡️ CDN Caching: ${state(row.cdn_enabled)}\n\n` +
+    'برای تغییر، گزینه‌ها را بزنید.\n<i>تغییر منطقه روی پنل‌هایی که Volume دارند کمی طول می‌کشد.</i>'
+
+  const regionButtons: TgButton[] = RAILWAY_REGIONS.map((r) => ({
+    text: `${r.id === row.region ? '✅ ' : ''}📍 ${r.label}`,
+    callback_data: `srvset:g:${deployId}:${r.id}`,
+  }))
+  const rows: TgButton[][] = []
+  for (let i = 0; i < regionButtons.length; i += 2) rows.push(regionButtons.slice(i, i + 2))
+  rows.push([{ text: `💤 Serverless: ${state(row.sleep_application)}`, callback_data: `srvset:t:${deployId}:s` }])
+  rows.push([{ text: `🌐 IPv6: ${state(row.ipv6_egress)}`, callback_data: `srvset:t:${deployId}:6` }])
+  rows.push([{ text: `⚡️ CDN: ${state(row.cdn_enabled)}`, callback_data: `srvset:t:${deployId}:c` }])
+  rows.push([{ text: '🖥 سرورها', callback_data: 'l:servers:0' }, homeButton()])
+  return { text, keyboard: { inline_keyboard: rows } }
 }
 
 export function helpScreen(): Screen {
@@ -705,6 +772,38 @@ export async function routeCallback(args: RouterArgs): Promise<Screen | null> {
       text: `⏳ <b>هنوز در حال استقرار است…</b>\n\nوضعیت: <code>${watched.status}</code>\n\nچند لحظه دیگر دوباره «بررسی وضعیت» را بزنید.`,
       keyboard: { inline_keyboard: [[{ text: '🔄 بررسی دوباره', callback_data: `srv:${platform}:${id}` }], [{ text: '🖥 سرورها', callback_data: 'l:servers:0' }], [homeButton()]] },
     }
+  }
+
+  // ── Service settings for a Railway deployment (region, Serverless, IPv6, CDN) ──
+  if (kind === 'srvset') {
+    const parts = args.data.split(':')
+    const action = parts[1] ?? 'o'
+    const deployId = parts[2] ?? ''
+    if (!deployId) return serversScreen(ctx, 0)
+    // Any non-`o` action first applies the change, then the screen re-renders
+    // from the record the engine just updated.
+    if (action === 'g' || action === 't') {
+      const current = await env.DB.prepare('SELECT sleep_application, ipv6_egress, cdn_enabled FROM railway_deploys WHERE id = ? AND user_id = ?')
+        .bind(deployId, args.userId)
+        .first<{ sleep_application: number | null; ipv6_egress: number | null; cdn_enabled: number | null }>()
+      if (!current) return serversScreen(ctx, 0)
+      const patch: PanelSettingsPatch = {}
+      if (action === 'g') patch.region = parts[3] ?? ''
+      if (action === 't') {
+        const field = parts[3]
+        if (field === 's') patch.sleepApplication = !current.sleep_application
+        if (field === '6') patch.ipv6Egress = !current.ipv6_egress
+        if (field === 'c') patch.cdnEnabled = !current.cdn_enabled
+      }
+      const applied = await updatePanelSettings(env, args.userId, 'railway', deployId, patch)
+      if (!applied.ok) {
+        return {
+          text: `❌ <b>تغییر تنظیمات ناموفق بود</b>\n\n⚠️ ${applied.error}`,
+          keyboard: { inline_keyboard: [[{ text: '🔙 تنظیمات', callback_data: `srvset:o:${deployId}` }], [homeButton()]] },
+        }
+      }
+    }
+    return serverSettingsScreen(env, args.userId, deployId)
   }
 
   if (kind === 'cp') {

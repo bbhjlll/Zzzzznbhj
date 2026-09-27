@@ -74,6 +74,9 @@ const SCHEMA_STATEMENTS = [
     auto_update INTEGER NOT NULL DEFAULT 0,
     last_version TEXT,
     last_updated_at TEXT,
+    sleep_application INTEGER,
+    ipv6_egress INTEGER,
+    cdn_enabled INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE TABLE IF NOT EXISTS render_deploys (
@@ -293,6 +296,12 @@ const MIGRATIONS = [
   `ALTER TABLE railway_deploys ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE railway_deploys ADD COLUMN last_version TEXT`,
   `ALTER TABLE railway_deploys ADD COLUMN last_updated_at TEXT`,
+  // Per-service Railway settings the owner can change after deployment (see
+  // the "تنظیمات سرویس" panel): serverless, outbound IPv6 and CDN caching.
+  // NULL means "not set by us yet".
+  `ALTER TABLE railway_deploys ADD COLUMN sleep_application INTEGER`,
+  `ALTER TABLE railway_deploys ADD COLUMN ipv6_egress INTEGER`,
+  `ALTER TABLE railway_deploys ADD COLUMN cdn_enabled INTEGER`,
   `ALTER TABLE render_deploys ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE render_deploys ADD COLUMN last_version TEXT`,
   `ALTER TABLE render_deploys ADD COLUMN last_updated_at TEXT`,

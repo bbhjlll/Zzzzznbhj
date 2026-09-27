@@ -350,19 +350,56 @@ export function panelBranch(panel: PanelSpec): string {
  */
 export const DEFAULT_RAILWAY_REGION = 'europe-west4'
 
-/** Friendly Persian labels for the Railway region codes we use. */
+/** One selectable Railway deployment region. */
+export interface RailwayRegion {
+  /** Region code accepted by `serviceInstanceUpdate.input.region`. */
+  id: string
+  /** Persian label shown in the pickers. */
+  label: string
+  /** Country/area, for the secondary line. */
+  area: string
+}
+
+/**
+ * Every region Railway offers today.
+ *
+ * Sourced from Railway's public "Regions" reference (US West, US East, EU West
+ * and Southeast Asia). The owner wants Netherlands by default and the rest
+ * selectable per deployment, so this list is the one place both the bot and the
+ * web app read the choices from.
+ */
+export const RAILWAY_REGIONS: RailwayRegion[] = [
+  { id: 'europe-west4', label: 'هلند (آمستردام)', area: 'اروپای غربی' },
+  { id: 'us-west2', label: 'آمریکا (کالیفرنیا)', area: 'غرب آمریکا' },
+  { id: 'us-east4', label: 'آمریکا (ویرجینیا)', area: 'شرق آمریکا' },
+  { id: 'asia-southeast1', label: 'سنگاپور', area: 'جنوب‌شرق آسیا' },
+]
+
+/**
+ * Labels for the region codes Railway may return or store — including the
+ * suffixed "metal" identifiers used by multi-region config, so a record written
+ * by the dashboard still renders with a friendly name.
+ */
 export const RAILWAY_REGION_LABELS: Record<string, string> = {
   'europe-west4': 'هلند (آمستردام)',
+  'europe-west4-drams3a': 'هلند (آمستردام)',
   'us-west2': 'آمریکا (کالیفرنیا)',
   'us-west1': 'آمریکا (اورگان)',
   'us-east4': 'آمریکا (ویرجینیا)',
+  'us-east4-eqdc4a': 'آمریکا (ویرجینیا)',
   'asia-southeast1': 'سنگاپور',
+  'asia-southeast1-eqsg3a': 'سنگاپور',
 }
 
 /** Human label for a Railway region code (falls back to the raw code). */
 export function railwayRegionLabel(region?: string | null): string {
   if (!region) return RAILWAY_REGION_LABELS[DEFAULT_RAILWAY_REGION]
   return RAILWAY_REGION_LABELS[region] ?? region
+}
+
+/** Is this a region code we offer? (Keeps a bad request away from Railway.) */
+export function isRailwayRegion(region: string): boolean {
+  return RAILWAY_REGIONS.some((r) => r.id === region)
 }
 
 /** Generated and user-specific values used to build a deployment manifest. */

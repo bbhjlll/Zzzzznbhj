@@ -32,8 +32,10 @@ import {
   Rocket,
   Server,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
 } from 'lucide-react'
+import { DEFAULT_RAILWAY_REGION, RAILWAY_REGIONS, railwayRegionLabel } from '../../shared/panels'
 import { api } from '../lib/api'
 import type {
   HostedPanelDeploy,
@@ -63,6 +65,53 @@ const PLATFORM_LABEL: Record<HostedPanelDeploy['platform'], string> = {
 /** Deployment-target chip label (the spec also lists `vps`). */
 const TARGET_LABEL: Record<string, string> = { railway: 'Railway', render: 'Render', vps: 'VPS' }
 
+/** A partial settings change sent to `POST /panels/settings`. */
+type SettingsPatch = {
+  region?: string
+  sleepApplication?: boolean
+  ipv6Egress?: boolean
+  cdnEnabled?: boolean
+}
+
+/** One on/off row of the service-settings panel. */
+function SettingToggle({
+  label,
+  hint,
+  value,
+  disabled,
+  onToggle,
+}: {
+  label: string
+  hint: string
+  value: boolean | null
+  disabled: boolean
+  onToggle: (next: boolean) => void
+}) {
+  const on = value === true
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => onToggle(!on)}
+      className="w-full flex items-start gap-2.5 text-start disabled:opacity-50"
+    >
+      <span
+        className={`mt-0.5 w-8 h-4 shrink-0 rounded-full border transition-colors relative ${
+          on ? 'bg-brand-500/40 border-brand-300/50' : 'bg-slate-700/50 border-white/[0.08]'
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 w-3 h-3 rounded-full transition-all ${on ? 'bg-brand-300 start-4' : 'bg-slate-400 start-0.5'}`}
+        />
+      </span>
+      <span className="min-w-0">
+        <span className={`block text-xs ${on ? 'text-brand-300' : 'text-slate-300'}`}>{label}</span>
+        <span className="block text-[10px] text-slate-500 leading-relaxed">{hint}</span>
+      </span>
+    </button>
+  )
+}
+
 export default function PanelDeploys({ variant = 'card' }: Props) {
   const [data, setData] = useState<HostedPanelOverview | null>(null)
   const [loading, setLoading] = useState(true)
@@ -73,6 +122,8 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
   const [updating, setUpdating] = useState<string | null>(null)
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
   const [copied, setCopied] = useState<string | null>(null)
+  /** Which deployment's service-settings panel is expanded. */
+  const [settingsFor, setSettingsFor] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -158,6 +209,27 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
       await load()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تغییر بروزرسانی خودکار ناموفق بود')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /**
+   * Change a running deployment's platform settings (region, Serverless,
+   * outbound IPv6, CDN caching). The endpoint returns the refreshed registry, so
+   * the card reflects exactly what the platform accepted.
+   */
+  const saveSettings = async (d: HostedPanelDeploy, patch: SettingsPatch) => {
+    setBusy(key(d))
+    try {
+      const { data: fresh } = await api<{ data: { deploys: HostedPanelDeploy[] } }>('/panels/settings', {
+        method: 'POST',
+        body: { platform: d.platform, id: d.id, ...patch },
+      })
+      setData((prev) => (prev ? { ...prev, deploys: fresh.deploys } : prev))
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'تغییر تنظیمات ناموفق بود')
     } finally {
       setBusy(null)
     }
@@ -472,6 +544,19 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
                       <CheckCircle2 className="w-3.5 h-3.5" /> روی {PLATFORM_LABEL[d.platform]} زنده است
                     </span>
                   )}
+                  {d.platform === 'railway' && (
+                    <button
+                      onClick={() => setSettingsFor(settingsFor === key(d) ? null : key(d))}
+                      disabled={busyHere}
+                      data-guide="p-settings"
+                      className={`text-xs inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border transition-colors ${
+                        settingsFor === key(d) ? 'text-brand-300 border-brand-300/40 bg-brand-500/10' : 'text-slate-400 border-white/[0.08]'
+                      }`}
+                      title="منطقه، Serverless، Outbound IPv6 و CDN"
+                    >
+                      <SlidersHorizontal className="w-3.5 h-3.5" /> تنظیمات سرویس
+                    </button>
+                  )}
                   <button
                     onClick={() => void forget(d)}
                     disabled={busyHere}
@@ -481,6 +566,61 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
                     <Trash2 className="w-3.5 h-3.5" /> حذف از فهرست
                   </button>
                 </div>
+
+                {/* Service settings — the same knobs the Railway dashboard exposes */}
+                {d.platform === 'railway' && settingsFor === key(d) && (
+                  <div className="mt-3 rounded-xl border border-white/[0.08] bg-white/[0.02] p-3 space-y-3">
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] text-slate-400">منطقهٔ استقرار</label>
+                        <span className="text-[10px] text-slate-500">{railwayRegionLabel(d.region ?? DEFAULT_RAILWAY_REGION)}</span>
+                      </div>
+                      <select
+                        value={d.region ?? DEFAULT_RAILWAY_REGION}
+                        disabled={busyHere}
+                        onChange={(e) => void saveSettings(d, { region: e.target.value })}
+                        className="w-full bg-slate-900/70 border border-white/[0.08] rounded-lg px-2 py-1.5 text-xs text-slate-200 disabled:opacity-50"
+                        dir="ltr"
+                      >
+                        {RAILWAY_REGIONS.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.label} — {r.area}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-[10px] text-slate-500 mt-1 leading-relaxed">
+                        تغییر منطقه بدون قطعی است، مگر پنل Volume داشته باشد؛ در آن صورت منتقل‌شدن حجم کمی طول می‌کشد و سرویس موقتاً قطع می‌شود.
+                      </p>
+                    </div>
+
+                    <SettingToggle
+                      label="Serverless (خواب در بی‌کاری)"
+                      hint="کانتینر بدون ترافیک به صفر مقیاس می‌دهد و با درخواست بعدی بیدار می‌شود؛ هزینهٔ مصرف کمتر می‌شود."
+                      value={d.sleepApplication}
+                      disabled={busyHere}
+                      onToggle={(v) => void saveSettings(d, { sleepApplication: v })}
+                    />
+                    <SettingToggle
+                      label="Outbound IPv6"
+                      hint="اجازهٔ اتصال خروجی به مقصدهای IPv6 (مثل برخی سرویس‌های ایمیلی/API)."
+                      value={d.ipv6Egress}
+                      disabled={busyHere}
+                      onToggle={(v) => void saveSettings(d, { ipv6Egress: v })}
+                    />
+                    <SettingToggle
+                      label="CDN Caching"
+                      hint="کش‌کردن فایل‌های استاتیک در لبه؛ نیاز به دامنهٔ عمومی دارد و برای پنل‌های لاگین‌محور معمولاً لازم نیست."
+                      value={d.cdnEnabled}
+                      disabled={busyHere}
+                      onToggle={(v) => void saveSettings(d, { cdnEnabled: v })}
+                    />
+                    {busyHere && (
+                      <p className="text-[10px] text-brand-300 flex items-center gap-1">
+                        <Loader2 className="w-3 h-3 animate-spin" /> در حال اعمال…
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             )
           })}

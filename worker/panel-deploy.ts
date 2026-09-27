@@ -9,8 +9,8 @@
 
 import type { Env } from './env'
 import { genId, nowIso } from './util'
-import { DEFAULT_RAILWAY_REGION, panelBranch, resolvePanel, type PanelCapability, type PanelSpec } from '../shared/panels'
-import { deployToRailway, RailwayApiError, railwayDeployStatus, railwayRedeploy, updateRailwayPanel } from './railway'
+import { DEFAULT_RAILWAY_REGION, isRailwayRegion, panelBranch, resolvePanel, type PanelCapability, type PanelSpec } from '../shared/panels'
+import { deployToRailway, RailwayApiError, railwayDeployStatus, railwayRedeploy, updateRailwayPanel, updateRailwayServiceSettings } from './railway'
 import { deployToRender, RenderApiError, renderDeployStatus, renderRedeploy } from './render'
 import { notifyDeployment } from './telegram-core'
 
@@ -334,6 +334,14 @@ export interface PanelDeployRow {
   lastVersion: string | null
   /** When the last update/redeploy was triggered (ISO), null if never. */
   lastUpdatedAt: string | null
+  /** Railway only — region code the service runs in. */
+  region: string | null
+  /** Railway only — container sleeps when idle (Serverless). null = not set. */
+  sleepApplication: boolean | null
+  /** Railway only — outbound IPv6 allowed. null = not set. */
+  ipv6Egress: boolean | null
+  /** Railway only — CDN caching enabled. null = not set/unknown. */
+  cdnEnabled: boolean | null
 }
 
 /** Every panel this user has deployed on Railway/Render, newest first. */
@@ -341,7 +349,8 @@ export async function listPanelDeploys(env: Env, userId: string): Promise<PanelD
   const rail = await env.DB.prepare(
     `SELECT id, name, panel, domain, project_id, current_deployment_id, branch, commit_sha, commit_url,
             auto_deploy, tcp_proxy_domain, tcp_proxy_port, tcp_proxy_application_port, tcp_proxy_error,
-            tcp_proxies, auto_update, last_version, last_updated_at,
+            tcp_proxies, auto_update, last_version, last_updated_at, region,
+            sleep_application, ipv6_egress, cdn_enabled,
             admin_username, admin_password, setup_done, created_at
      FROM railway_deploys WHERE user_id = ?`,
   ).bind(userId).all<{
@@ -350,7 +359,8 @@ export async function listPanelDeploys(env: Env, userId: string): Promise<PanelD
     auto_deploy: number; tcp_proxy_domain: string | null; tcp_proxy_port: number | null
     tcp_proxy_application_port: number | null; tcp_proxy_error: string | null; tcp_proxies: string | null
     admin_username: string | null; admin_password: string | null; setup_done: number; created_at: string | null
-    auto_update: number | null; last_version: string | null; last_updated_at: string | null
+    auto_update: number | null; last_version: string | null; last_updated_at: string | null; region: string | null
+    sleep_application: number | null; ipv6_egress: number | null; cdn_enabled: number | null
   }>()
   const render = await env.DB.prepare(
     'SELECT id, name, panel, url, service_id, admin_username, admin_password, setup_done, created_at, auto_update, last_version, last_updated_at FROM render_deploys WHERE user_id = ?',
@@ -393,6 +403,10 @@ export async function listPanelDeploys(env: Env, userId: string): Promise<PanelD
       autoUpdate: !!r.auto_update,
       lastVersion: r.last_version,
       lastUpdatedAt: r.last_updated_at,
+      region: r.region ?? null,
+      sleepApplication: r.sleep_application == null ? null : !!r.sleep_application,
+      ipv6Egress: r.ipv6_egress == null ? null : !!r.ipv6_egress,
+      cdnEnabled: r.cdn_enabled == null ? null : !!r.cdn_enabled,
     })
   }
   for (const r of render.results ?? []) {
@@ -424,6 +438,11 @@ export async function listPanelDeploys(env: Env, userId: string): Promise<PanelD
       autoUpdate: !!r.auto_update,
       lastVersion: r.last_version,
       lastUpdatedAt: r.last_updated_at,
+      // Render exposes these in its own dashboard; they are Railway-only here.
+      region: null,
+      sleepApplication: null,
+      ipv6Egress: null,
+      cdnEnabled: null,
     })
   }
   return rows.sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
@@ -696,6 +715,96 @@ export async function setPanelAutoUpdate(
     .bind(genId(), userId, enabled ? 'panel_auto_update_on' : 'panel_auto_update_off', 'deployment', owned.name ?? id, nowIso())
     .run()
   return { ok: true, autoUpdate: enabled }
+}
+
+/** Platform settings the owner can change on a running deployment. */
+export interface PanelSettingsPatch {
+  /** Railway region code (one of `RAILWAY_REGIONS`). */
+  region?: string
+  /** Railway "Enable Serverless" — sleep the container when idle. */
+  sleepApplication?: boolean
+  /** Railway "Enable Outbound IPv6". */
+  ipv6Egress?: boolean
+  /** Railway "Enable CDN Caching". */
+  cdnEnabled?: boolean
+}
+
+interface RailwaySettingsRecord {
+  name: string | null
+  panel: string | null
+  token_id: string
+  service_id: string
+  environment_id: string | null
+}
+
+/**
+ * Change a running deployment's platform settings.
+ *
+ * The owner picks the region, serverless, outbound IPv6 and CDN caching after
+ * deployment (the same knobs the Railway dashboard exposes). Railway is applied
+ * first and our record only updated once it succeeds, so a card can never show a
+ * setting the platform refused. Render deployments are refused: Render owns
+ * those toggles in its own dashboard.
+ */
+export async function updatePanelSettings(
+  env: Env,
+  userId: string,
+  platform: PanelPlatform,
+  id: string,
+  patch: PanelSettingsPatch,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const rec = platform === 'railway'
+    ? await env.DB.prepare(
+        'SELECT name, panel, token_id, service_id, environment_id FROM railway_deploys WHERE id = ? AND user_id = ?',
+      ).bind(id, userId).first<RailwaySettingsRecord>()
+    : await env.DB.prepare('SELECT name, panel, token_id FROM render_deploys WHERE id = ? AND user_id = ?')
+        .bind(id, userId).first<{ name: string | null; panel: string | null; token_id: string }>()
+  if (!rec) return { ok: false, error: 'این پنل در فهرست شما نیست' }
+  if (platform !== 'railway') {
+    return { ok: false, error: 'این تنظیمات فقط برای استقرارهای Railway در دسترس است' }
+  }
+  const rail = rec as RailwaySettingsRecord
+  if (!rail.environment_id) return { ok: false, error: 'اطلاعات محیط این استقرار کامل نیست — یک استقرار تازه بسازید' }
+  if (patch.region !== undefined && !isRailwayRegion(patch.region)) {
+    return { ok: false, error: 'منطقهٔ انتخابی معتبر نیست' }
+  }
+
+  const token = await activeToken(env, userId, rail.token_id, platform)
+  if (!token) return { ok: false, error: 'توکن فعال این استقرار پیدا نشد — ابتدا یک توکن تازه اضافه کنید' }
+
+  try {
+    await updateRailwayServiceSettings(token, {
+      serviceId: rail.service_id,
+      environmentId: rail.environment_id,
+      ...(patch.region !== undefined ? { region: patch.region } : {}),
+      ...(typeof patch.sleepApplication === 'boolean' ? { sleepApplication: patch.sleepApplication } : {}),
+      ...(typeof patch.ipv6Egress === 'boolean' ? { ipv6Egress: patch.ipv6Egress } : {}),
+      ...(typeof patch.cdnEnabled === 'boolean' ? { cdnEnabled: patch.cdnEnabled } : {}),
+    })
+  } catch (err) {
+    const msg =
+      err instanceof RailwayApiError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : 'تغییر تنظیمات سرویس ناموفق بود'
+    return { ok: false, error: msg }
+  }
+
+  const sets: string[] = []
+  const binds: Array<string | number> = []
+  if (patch.region !== undefined) { sets.push('region = ?'); binds.push(patch.region) }
+  if (typeof patch.sleepApplication === 'boolean') { sets.push('sleep_application = ?'); binds.push(patch.sleepApplication ? 1 : 0) }
+  if (typeof patch.ipv6Egress === 'boolean') { sets.push('ipv6_egress = ?'); binds.push(patch.ipv6Egress ? 1 : 0) }
+  if (typeof patch.cdnEnabled === 'boolean') { sets.push('cdn_enabled = ?'); binds.push(patch.cdnEnabled ? 1 : 0) }
+  if (sets.length) {
+    binds.push(id, userId)
+    await env.DB.prepare(`UPDATE railway_deploys SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`).bind(...binds).run()
+  }
+  await env.DB.prepare('INSERT INTO activity_logs (id, user_id, action, entity_type, entity_name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(genId(), userId, 'panel_settings_changed', 'deployment', rail.name ?? resolvePanel(rail.panel).name, nowIso())
+    .run()
+  return { ok: true }
 }
 
 export interface PanelAutoUpdateSummary {

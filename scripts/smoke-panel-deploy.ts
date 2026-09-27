@@ -25,6 +25,7 @@ import {
   probePanelHealth,
   fetchLatestPanelVersion,
   updatePanelDeploy,
+  updatePanelSettings,
   setPanelAutoUpdate,
   autoUpdatePanels,
 } from '../worker/panel-deploy'
@@ -604,6 +605,45 @@ async function main() {
   const adopted = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'adopted-build', panel })
   check('deploy succeeds by adopting the existing build', adopted.ok === true && adopted.id === 'adopted-dep', JSON.stringify(adopted).slice(0, 160))
   if (adopted.ok) check('the adopted deployment is persisted', env.tables.railway_deploys.has('adopted-dep'))
+
+  console.log('17) post-deploy service settings (region, serverless, IPv6, CDN)')
+  env.tables.railway_deploys.set('set1', {
+    id: 'set1', user_id: 'u1', token_id: 'rt1', project_id: 'prjS', service_id: 'svcS', environment_id: 'envS',
+    panel: panel.id, name: 'settings-app', region: 'europe-west4', setup_done: 1, created_at: '2026-05-05T00:00:00.000Z',
+  })
+  calls.length = 0
+  // region+serverless (one serviceInstanceUpdate), IPv6 (environmentPatchCommit), CDN (enableServiceCdn)
+  gqlQueue = [{}, {}, {}]
+  const applied = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', {
+    region: 'us-west2',
+    sleepApplication: true,
+    ipv6Egress: true,
+    cdnEnabled: true,
+  })
+  check('settings applied', applied.ok === true, JSON.stringify(applied))
+  const setRow = env.tables.railway_deploys.get('set1')
+  check('region persisted', setRow?.['region'] === 'us-west2', String(setRow?.['region']))
+  check('serverless persisted', setRow?.['sleep_application'] === 1, String(setRow?.['sleep_application']))
+  check('IPv6 persisted', setRow?.['ipv6_egress'] === 1, String(setRow?.['ipv6_egress']))
+  check('CDN persisted', setRow?.['cdn_enabled'] === 1, String(setRow?.['cdn_enabled']))
+  const instanceBody = calls.map((c) => c.body ?? '').find((b) => b.includes('serviceInstanceUpdate')) ?? ''
+  check('region + serverless sent to serviceInstanceUpdate', instanceBody.includes('"region":"us-west2"') && instanceBody.includes('"sleepApplication":true'), instanceBody.slice(0, 200))
+  const ipv6Body = calls.map((c) => c.body ?? '').find((b) => b.includes('environmentPatchCommit')) ?? ''
+  check('IPv6 committed as an environment patch', ipv6Body.includes('ipv6EgressEnabled') && ipv6Body.includes('svcS'), ipv6Body.slice(0, 220))
+  check('CDN enabled through enableServiceCdn', calls.some((c) => (c.body ?? '').includes('enableServiceCdn')))
+  check('settings change logged', [...env.tables.activity_logs.values()].some((l) => l['action'] === 'panel_settings_changed'))
+
+  gqlQueue = [{}]
+  const cdnOff = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { cdnEnabled: false })
+  check('CDN disabled through disableServiceCdn', cdnOff.ok === true && calls.some((c) => (c.body ?? '').includes('disableServiceCdn')), JSON.stringify(cdnOff))
+  check('CDN flag persisted off', env.tables.railway_deploys.get('set1')?.['cdn_enabled'] === 0)
+
+  const badRegion = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { region: 'mars-1' })
+  check('unknown region refused before hitting Railway', badRegion.ok === false, JSON.stringify(badRegion))
+  const foreignSettings = await updatePanelSettings(env as never, 'u1', 'railway', 'nope', { sleepApplication: true })
+  check('another user’s deployment refused', foreignSettings.ok === false)
+  const renderRefused = await updatePanelSettings(env as never, 'u1', 'render', 'rnd3', { sleepApplication: true })
+  check('settings refused for Render', renderRefused.ok === false, JSON.stringify(renderRefused))
 
   console.log(`\n${pass} passed, ${fail} failed`)
   globalThis.fetch = realFetch

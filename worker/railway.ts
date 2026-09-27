@@ -589,3 +589,115 @@ export async function railwayRedeploy(token: string, serviceId: string, environm
   if (!deploymentId) throw new RailwayApiError('دستور بروزرسانی روی Railway اجرا نشد')
   return deploymentId
 }
+
+// ── Per-service settings (region, serverless, outbound IPv6, CDN) ────────────
+
+/** A partial settings change; every defined field is applied independently. */
+export interface RailwaySettingsPatch {
+  /** Region code — must be one of `RAILWAY_REGIONS` (validated by the caller). */
+  region?: string
+  /** Sleep the container when idle (Railway's "Enable Serverless"). */
+  sleepApplication?: boolean
+  /** Allow outbound IPv6 connections (Railway stages this as a config change). */
+  ipv6Egress?: boolean
+  /** CDN caching (needs an applied public domain). */
+  cdnEnabled?: boolean
+}
+
+/** What Railway reports back for the toggles we cannot read directly. */
+export interface RailwayServiceSettings {
+  /** Region currently configured on the service, when Railway reports one. */
+  region: string | null
+  /** True when CDN caching is on; null when it could not be determined. */
+  cdnEnabled: boolean | null
+}
+
+interface ServiceEdgeState {
+  region?: string | null
+  edgeConfig?: { enabled?: boolean | null; caching?: { mode?: string | null } | null } | null
+}
+
+/**
+ * Read the settings Railway exposes through a plain query.
+ *
+ * Only fields confirmed in Railway's public API are requested — an unknown
+ * field fails the whole GraphQL query, which would lose the region too. Serverless
+ * and outbound IPv6 have no documented read field, so those come from our own
+ * record (see `panel-deploy.ts`).
+ */
+export async function readRailwayServiceSettings(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+): Promise<RailwayServiceSettings> {
+  try {
+    const data = await gql(
+      token,
+      'query ($serviceId: String!, $environmentId: String!) { serviceInstance(serviceId: $serviceId, environmentId: $environmentId) { region edgeConfig { enabled caching { mode } } } }',
+      { serviceId, environmentId },
+    )
+    const inst = data.serviceInstance as ServiceEdgeState | undefined
+    const edge = inst?.edgeConfig
+    const cdnEnabled = edge ? Boolean(edge.enabled) && (edge.caching?.mode ?? '').toLowerCase() !== 'off' : null
+    return { region: inst?.region ?? null, cdnEnabled }
+  } catch {
+    return { region: null, cdnEnabled: null }
+  }
+}
+
+/**
+ * Apply a settings change on an existing Railway service.
+ *
+ *  • `region` / `sleepApplication` → `serviceInstanceUpdate` (public API).
+ *  • `ipv6Egress` → `environmentPatchCommit`: Railway models outbound IPv6 as an
+ *    environment config change, and committing that patch also triggers the
+ *    redeploy the toggle needs.
+ *  • `cdnEnabled` → `enableServiceCdn` / `disableServiceCdn` (needs an applied
+ *    public domain, which a deployed panel always has).
+ *
+ * Each step is independent: a refusal on one setting does not discard the
+ * others, and the first error is surfaced to the caller.
+ */
+export async function updateRailwayServiceSettings(
+  token: string,
+  opts: { serviceId: string; environmentId: string } & RailwaySettingsPatch,
+): Promise<void> {
+  const instanceInput: Record<string, unknown> = {}
+  if (opts.region) instanceInput.region = opts.region
+  if (typeof opts.sleepApplication === 'boolean') instanceInput.sleepApplication = opts.sleepApplication
+  if (Object.keys(instanceInput).length) {
+    await gql(
+      token,
+      'mutation ($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }',
+      { serviceId: opts.serviceId, environmentId: opts.environmentId, input: instanceInput },
+    )
+  }
+
+  if (typeof opts.ipv6Egress === 'boolean') {
+    await gql(
+      token,
+      'mutation ($environmentId: String!, $patch: EnvironmentConfig!, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }',
+      {
+        environmentId: opts.environmentId,
+        patch: { services: { [opts.serviceId]: { deploy: { ipv6EgressEnabled: opts.ipv6Egress } } } },
+        commitMessage: `miliconfig: outbound IPv6 ${opts.ipv6Egress ? 'enabled' : 'disabled'}`,
+      },
+    )
+  }
+
+  if (typeof opts.cdnEnabled === 'boolean') {
+    if (opts.cdnEnabled) {
+      await gql(
+        token,
+        'mutation ($input: EnableServiceCdnInput!) { enableServiceCdn(input: $input) { id enabled } }',
+        { input: { serviceId: opts.serviceId, environmentId: opts.environmentId } },
+      )
+    } else {
+      await gql(
+        token,
+        'mutation ($input: DisableServiceCdnInput!) { disableServiceCdn(input: $input) }',
+        { input: { serviceId: opts.serviceId, environmentId: opts.environmentId } },
+      )
+    }
+  }
+}

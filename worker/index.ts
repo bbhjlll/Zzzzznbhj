@@ -11,9 +11,11 @@ import {
   forgetPanelDeploy,
   probePanelHealth,
   updatePanelDeploy,
+  updatePanelSettings,
   setPanelAutoUpdate,
   fetchLatestPanelVersion,
   autoUpdatePanels,
+  type PanelSettingsPatch,
 } from './panel-deploy'
 import { handleWorkerConfig } from './kvconfig'
 import { handleIpScanner, handleRangeScan } from './scanner'
@@ -242,6 +244,33 @@ async function handlePanelUpdate(env: Env, userId: string, request: Request): Pr
   const updated = await updatePanelDeploy(env, userId, platform, body.id)
   if (!updated.ok) return apiError(updated.error, 400)
   return json({ data: updated })
+}
+
+/**
+ * Change a running panel's platform settings — region, Serverless, outbound
+ * IPv6 and CDN caching. Returns the refreshed registry so the card in the UI
+ * updates from the server instead of guessing.
+ */
+async function handlePanelSettings(env: Env, userId: string, request: Request): Promise<Response> {
+  const body = safeJsonParse<{
+    platform?: string
+    id?: string
+    region?: string
+    sleepApplication?: boolean
+    ipv6Egress?: boolean
+    cdnEnabled?: boolean
+  }>(await request.text().catch(() => ''), {})
+  const platform = panelPlatformOf(body.platform)
+  if (!platform || !body.id) return apiError('پلتفرم و شناسهٔ استقرار الزامی است')
+  const patch: PanelSettingsPatch = {}
+  if (typeof body.region === 'string') patch.region = body.region
+  if (typeof body.sleepApplication === 'boolean') patch.sleepApplication = body.sleepApplication
+  if (typeof body.ipv6Egress === 'boolean') patch.ipv6Egress = body.ipv6Egress
+  if (typeof body.cdnEnabled === 'boolean') patch.cdnEnabled = body.cdnEnabled
+  if (!Object.keys(patch).length) return apiError('تنظیمی برای تغییر ارسال نشده')
+  const result = await updatePanelSettings(env, userId, platform, body.id, patch)
+  if (!result.ok) return apiError(result.error, 400)
+  return json({ data: { deploys: await listPanelDeploys(env, userId) } })
 }
 
 /** Opt one hosted panel into (or out of) the scheduled latest-version sweep. */
@@ -769,6 +798,7 @@ async function handleRouted(
     if (path === '/api/panels/watch' && method === 'POST') return await handlePanelWatch(env, user.id, request)
     if (path === '/api/panels/health' && method === 'POST') return await handlePanelHealth(env, user.id, request)
     if (path === '/api/panels/update' && method === 'POST') return await handlePanelUpdate(env, user.id, request)
+    if (path === '/api/panels/settings' && method === 'POST') return await handlePanelSettings(env, user.id, request)
     if (path === '/api/panels/auto-update' && method === 'POST') return await handlePanelAutoUpdate(env, user.id, request)
     if (path === '/api/panels/forget' && method === 'POST') return await handlePanelForget(env, user.id, request)
 

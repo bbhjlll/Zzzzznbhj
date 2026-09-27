@@ -266,6 +266,14 @@ export interface HostedPanelDeploy {
   lastVersion: string | null
   /** When the last update/rebuild was triggered (ISO), null if never. */
   lastUpdatedAt: string | null
+  /** Railway only — region code the service runs in. */
+  region: string | null
+  /** Railway only — Serverless (sleep when idle). null = not set yet. */
+  sleepApplication: boolean | null
+  /** Railway only — outbound IPv6. null = not set yet. */
+  ipv6Egress: boolean | null
+  /** Railway only — CDN caching. null = not set yet. */
+  cdnEnabled: boolean | null
 }
 
 /** Newest upstream commit of the panel's repository (from `GET /panels`). */
