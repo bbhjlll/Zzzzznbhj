@@ -10,7 +10,7 @@
  *   → env vars + start command → serviceInstanceDeployV2 → poll until SUCCESS
  */
 
-import { buildPanelDeployEnv, panelBranch, panelDataDir, panelDataFile, panelTcpPorts, type PanelSpec } from '../shared/panels'
+import { buildPanelDeployEnv, DEFAULT_RAILWAY_REGION, panelBranch, panelDataDir, panelDataFile, panelTcpPorts, type PanelSpec } from '../shared/panels'
 
 export class RailwayApiError extends Error {
   /**
@@ -312,7 +312,7 @@ async function latestRailwayDeploymentId(
 export async function deployToRailway(
   token: string,
   projectName: string,
-  region = 'us-west2',
+  region = DEFAULT_RAILWAY_REGION,
   panel: PanelSpec,
   values: PanelDeployEnv,
 ): Promise<RailwayDeployResult> {

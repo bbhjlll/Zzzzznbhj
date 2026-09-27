@@ -9,7 +9,7 @@
 
 import type { Env } from './env'
 import { genId, nowIso } from './util'
-import { panelBranch, resolvePanel, type PanelCapability, type PanelSpec } from '../shared/panels'
+import { DEFAULT_RAILWAY_REGION, panelBranch, resolvePanel, type PanelCapability, type PanelSpec } from '../shared/panels'
 import { deployToRailway, RailwayApiError, railwayDeployStatus, railwayRedeploy, updateRailwayPanel } from './railway'
 import { deployToRender, RenderApiError, renderDeployStatus, renderRedeploy } from './render'
 import { notifyDeployment } from './telegram-core'
@@ -86,7 +86,9 @@ export async function startPanelDeploy(env: Env, input: StartPanelDeployInput): 
 
   try {
     if (platform === 'railway') {
-      const region = /^[a-z0-9-]+$/.test(input.region ?? '') ? (input.region as string) : 'us-west2'
+      // Netherlands (Amsterdam) is the required default; anything malformed falls
+      // back to it rather than a US region.
+      const region = /^[a-z0-9-]+$/.test(input.region ?? '') ? (input.region as string) : DEFAULT_RAILWAY_REGION
       const result = await deployToRailway(token, name, region, input.panel, { adminPassword, secretKey })
       await env.DB.prepare(
         `INSERT INTO railway_deploys (

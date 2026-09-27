@@ -340,6 +340,31 @@ export function panelBranch(panel: PanelSpec): string {
   return panel.defaultBranch ?? 'main'
 }
 
+/**
+ * Railway region every panel deploys to unless the caller asks otherwise.
+ *
+ * `europe-west4` is Railway's **Amsterdam / Netherlands** region, which is what
+ * the owner requires for panels (better latency for the Middle East audience).
+ * It is the single default used by the bot, the web wizard and the API, so no
+ * deploy path can silently fall back to the US.
+ */
+export const DEFAULT_RAILWAY_REGION = 'europe-west4'
+
+/** Friendly Persian labels for the Railway region codes we use. */
+export const RAILWAY_REGION_LABELS: Record<string, string> = {
+  'europe-west4': 'هلند (آمستردام)',
+  'us-west2': 'آمریکا (کالیفرنیا)',
+  'us-west1': 'آمریکا (اورگان)',
+  'us-east4': 'آمریکا (ویرجینیا)',
+  'asia-southeast1': 'سنگاپور',
+}
+
+/** Human label for a Railway region code (falls back to the raw code). */
+export function railwayRegionLabel(region?: string | null): string {
+  if (!region) return RAILWAY_REGION_LABELS[DEFAULT_RAILWAY_REGION]
+  return RAILWAY_REGION_LABELS[region] ?? region
+}
+
 /** Generated and user-specific values used to build a deployment manifest. */
 export interface PanelDeploySecrets {
   adminPassword: string

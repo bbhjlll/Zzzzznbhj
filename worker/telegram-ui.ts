@@ -1,6 +1,6 @@
 import type { Env } from './env'
 import { genId, nowIso, safeJsonParse } from './util'
-import { PANELS, panelsForTarget, panelOriginLabel, panelVerifiedLabel, resolvePanel } from '../shared/panels'
+import { PANELS, panelsForTarget, panelOriginLabel, panelVerifiedLabel, railwayRegionLabel, resolvePanel } from '../shared/panels'
 import { autoWorkerSources } from '../shared/worker-sources'
 import { startDeployment } from './deploy'
 import { startPanelDeploy, watchPanelDeploy, type PanelWatchResult, type StartPanelDeployResult } from './panel-deploy'
@@ -343,7 +343,7 @@ export async function serversScreen(ctx: ScreenCtx, page: number): Promise<Scree
     items.push({
       label: r.name ?? panel.name,
       panelName: panel.name,
-      meta: `🏗 Railway · 📍 ${r.region} · ${faDate(r.created_at)}`,
+      meta: `🏗 Railway · 📍 ${railwayRegionLabel(r.region)} · ${faDate(r.created_at)}`,
       base: r.domain ? `https://${r.domain}` : null,
       path: panel.panelPath,
       admin: r.admin_username,

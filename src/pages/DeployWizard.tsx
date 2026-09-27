@@ -20,7 +20,7 @@ import {
 import JSZip from 'jszip'
 import { generateDockerCompose, generateNginxConf, generateEnvFile, generateDeployScript, generateRailwayDockerfile, generateRailwayToml, generateRailwayReadme } from '../lib/vps-deploy'
 import type { CFToken, RailwayToken, RenderToken } from '../lib/types'
-import { PANELS } from '../../shared/panels'
+import { DEFAULT_RAILWAY_REGION, PANELS, railwayRegionLabel } from '../../shared/panels'
 
 /**
  * The panel this wizard installs. The catalog ships a single, first-party panel
@@ -314,7 +314,7 @@ export default function DeployWizard() {
             success: true,
             message: url
               ? (admin
-                  ? `${PANEL.name} در آمریکا مستقر شد و ادمین پنل ساخته شد! 🎉`
+                  ? `${PANEL.name} در ${railwayRegionLabel(DEFAULT_RAILWAY_REGION)} مستقر شد و ادمین پنل ساخته شد! 🎉`
                   : `${PANEL.name} با موفقیت روی Railway مستقر شد! 🎉`)
               : 'استقرار روی Railway موفق بود — دامنه را در بخش Networking پروژه فعال کنید.',
             url: url ?? undefined,
@@ -400,7 +400,7 @@ export default function DeployWizard() {
       try {
         const { data } = await api<{ data: { deploymentId: string; projectId: string; projectUrl: string; domain?: string; admin_username?: string; admin_password?: string } }>('/railway/deploy', {
           method: 'POST',
-          body: { token_id: rt.id, name, region: 'us-west2', panel: PANEL.id },
+          body: { token_id: rt.id, name, region: DEFAULT_RAILWAY_REGION, panel: PANEL.id },
         })
         setRailProjectUrl(data.projectUrl)
         if (data.admin_username && data.admin_password) {
@@ -410,7 +410,7 @@ export default function DeployWizard() {
           '✓ پروژه ساخته شد',
           '✓ محیط production آماده شد',
           `✓ مخزن ${PANEL.repo} (GitHub) متصل شد`,
-          '✓ منطقه: آمریکا (us-west2)',
+          `✓ منطقه: ${railwayRegionLabel(DEFAULT_RAILWAY_REGION)}`,
           ...(data.domain ? [`✓ دامنه: ${data.domain}`] : []),
           `✓ PORT=${PANEL_PORT} تنظیم شد`,
           `✓ استقرار شروع شد (${data.deploymentId.slice(0, 8)}…)`,

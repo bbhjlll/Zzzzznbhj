@@ -53,7 +53,7 @@ const SCHEMA_STATEMENTS = [
     service_id TEXT NOT NULL,
     environment_id TEXT NOT NULL,
     current_deployment_id TEXT,
-    region TEXT NOT NULL DEFAULT 'us-west2',
+    region TEXT NOT NULL DEFAULT 'europe-west4',
     domain TEXT,
     branch TEXT NOT NULL DEFAULT 'main',
     commit_sha TEXT,

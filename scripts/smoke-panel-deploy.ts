@@ -299,7 +299,15 @@ async function main() {
     )
     check('latest commit persisted', row?.['commit_sha'] === 'abc123def456' && row?.['current_deployment_id'] === 'dep1')
     check('activity logged', env.tables.activity_logs.size === 1)
+    // Netherlands (Amsterdam) is the required default region.
+    check('default region is the Netherlands', row?.['region'] === 'europe-west4', String(row?.['region']))
   }
+  const regionCall = calls.find((c) => (c.body ?? '').includes('serviceInstanceUpdate'))
+  check(
+    'railway service is pinned to the Netherlands region',
+    (regionCall?.body ?? '').includes('europe-west4'),
+    regionCall?.body?.slice(0, 160),
+  )
 
   console.log('4) watch — first live poll bootstraps admin once')
   setupStatus = 200
