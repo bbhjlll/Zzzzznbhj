@@ -422,12 +422,15 @@ export async function deployToRailway(
 
   // Turn automatic GitHub deploys back on only after every setting is in place.
   // Future pushes to the connected branch now update this panel without any
-  // action from miliconfig.
+  // action from miliconfig. Non-fatal: some project tokens reject this
+  // mutation with a permission error *after* the service has been fully
+  // created and its first deployment is already running — surfacing it would
+  // show the user a false failure while the panel actually deploys fine.
   await gql(
     token,
     'mutation ($input: ServiceInstanceAutoDeployUpdateInput!) { serviceInstanceAutoDeployUpdate(input: $input) { enabled } }',
     { input: { projectId, serviceId, environmentId, enabled: true } },
-  )
+  ).catch(() => null)
 
   const dep = await gql(
     token,
@@ -463,11 +466,13 @@ export async function updateRailwayPanel(
   branch = 'main',
 ): Promise<{ deploymentId: string; commitSha: string; commitUrl: string }> {
   const latest = await latestPanelCommit(panel, branch)
+  // Non-fatal for the same reason as in deployToRailway: the deploy command
+  // itself below is what the user is waiting on.
   await gql(
     token,
     'mutation ($input: ServiceInstanceAutoDeployUpdateInput!) { serviceInstanceAutoDeployUpdate(input: $input) { enabled } }',
     { input: { projectId, serviceId, environmentId, enabled: true } },
-  )
+  ).catch(() => null)
   const data = await gql(
     token,
     'mutation ($serviceId: String!, $environmentId: String!, $commitSha: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }',
