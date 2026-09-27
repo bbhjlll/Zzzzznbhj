@@ -61,9 +61,13 @@ function installFetch() {
     if (url.includes('api.github.com')) {
       // A queued item models one specific commit lookup (the connected-repo
       // "latest commit" read); otherwise answer the upstream version lookup with
-      // the newest commit of the tracked branch.
+      // the newest commit of the tracked branch. `__status` models a rate-limited
+      // (403) / throttled (429) answer.
       const queued = githubQueue.shift()
-      if (queued) return new Response(JSON.stringify(queued), { status: 200 })
+      if (queued) {
+        const status = typeof queued.__status === 'number' ? queued.__status : 200
+        return new Response(status === 200 ? JSON.stringify(queued) : '', { status })
+      }
       return new Response(
         JSON.stringify([
           {
@@ -547,6 +551,51 @@ async function main() {
   check('sweep rebuilt the stale deployment', sweep.updated === 1 && sweep.failed === 0, JSON.stringify(sweep))
   const swept = (await listPanelDeploys(env as never, 'u1')).find((r) => r.platform === 'render')!
   check('swept deployment records the upstream sha', swept.lastVersion === UPSTREAM_SHA && swept.id === 'rnd3', `${swept.id} · ${swept.lastVersion}`)
+
+  console.log('15) GitHub lookup rate-limited (HTTP 403) must not fail the deploy')
+  // The connected-repo "latest commit" read is best-effort: a Worker shares its
+  // egress IP, GitHub answers 403, and the panel still deploys from the branch
+  // HEAD. This is the exact failure mode users reported as "403 but it deploys".
+  const railwayPreamble = (ids: { prj: string; env: string; svc: string }) => [
+    { me: { workspaces: [{ id: 'ws1', name: 'W' }] } },
+    { projectCreate: { id: ids.prj } },
+    { project: { environments: { edges: [{ node: { id: ids.env, name: 'production' } }] } } },
+    { serviceCreate: { id: ids.svc } },
+    { serviceInstanceAutoDeployUpdate: { enabled: false } },
+    {},
+    { serviceDomainCreate: { domain: 'rate.up.railway.app' } },
+    { volumeCreate: { id: 'vol1' } },
+    { projectTokenCreate: 'project-token-9' },
+    { tcpProxyCreate: { id: 'tcp1', domain: 'p1.rlwy.net', proxyPort: 23177, applicationPort: 8443 } },
+    { tcpProxyCreate: { id: 'tcp2', domain: 'p2.rlwy.net', proxyPort: 23178, applicationPort: 8446 } },
+    { tcpProxyCreate: { id: 'tcp3', domain: 'p3.rlwy.net', proxyPort: 23179, applicationPort: 8448 } },
+    ...Array.from({ length: 11 }, () => ({})),
+    { serviceInstanceAutoDeployUpdate: { enabled: true } },
+  ]
+  githubQueue = [{ __status: 403 }]
+  gqlQueue = [...railwayPreamble({ prj: 'prjR', env: 'envR', svc: 'svcR' }), { serviceInstanceDeployV2: 'dep-head' }]
+  const rateLimited = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'rate-limited', panel })
+  check('deploy still succeeds when GitHub is rate-limited', rateLimited.ok === true, JSON.stringify(rateLimited).slice(0, 160))
+  if (rateLimited.ok) {
+    const row = env.tables.railway_deploys.get(rateLimited.id)
+    check('deployed from the branch HEAD (no pinned sha)', row?.['commit_sha'] === null, String(row?.['commit_sha']))
+  }
+  const headDeploy = calls.map((c) => c.body ?? '').filter((b) => b.includes('serviceInstanceDeployV2')).at(-1) ?? ''
+  check('deploy command omits commitSha when the sha is unknown', !headDeploy.includes('commitSha'), headDeploy.slice(0, 200))
+
+  console.log('16) refused explicit deploy adopts the build Railway already started')
+  // serviceCreate makes Railway build the repo immediately; a refused explicit
+  // deploy must therefore point at that build, not report a failed deployment.
+  githubQueue = [{ sha: 'headsha0123', html_url: 'https://github.com/miladjahani/Mizetusi/commit/headsha0123' }]
+  gqlQueue = [
+    ...railwayPreamble({ prj: 'prjA', env: 'envA', svc: 'svcA' }),
+    { __errors: [{ message: 'Not Authorized' }] },
+    { __errors: [{ message: 'Not Authorized' }] },
+    { deployments: { edges: [{ node: { id: 'adopted-dep' } }] } },
+  ]
+  const adopted = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'adopted-build', panel })
+  check('deploy succeeds by adopting the existing build', adopted.ok === true && adopted.id === 'adopted-dep', JSON.stringify(adopted).slice(0, 160))
+  if (adopted.ok) check('the adopted deployment is persisted', env.tables.railway_deploys.has('adopted-dep'))
 
   console.log(`\n${pass} passed, ${fail} failed`)
   globalThis.fetch = realFetch

@@ -191,8 +191,10 @@ export interface RailwayDeployResult {
   serviceId: string
   environmentId: string
   deploymentId: string
-  commitSha: string
-  commitUrl: string
+  /** Pinned upstream sha; null when GitHub could not be reached and Railway
+   *  deployed the connected branch HEAD instead. */
+  commitSha: string | null
+  commitUrl: string | null
   projectToken?: string | null
   /** First (direct) proxy — kept for the single-proxy card fields. */
   tcpProxy?: RailwayTcpProxy | null
@@ -211,22 +213,96 @@ export interface PanelDeployEnv {
 
 interface EnvEdge { node?: { id?: string; name?: string } }
 
-/** Latest commit that should be deployed for a connected GitHub branch. */
-async function latestPanelCommit(panel: PanelSpec, branch = 'main'): Promise<{ sha: string; url: string }> {
-  let response: Response
-  try {
-    response = await fetch(`https://api.github.com/repos/${panel.repo}/commits/${encodeURIComponent(branch)}`, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'miliconfig-panel-deployer' },
-    })
-  } catch {
-    throw new RailwayApiError('آخرین نسخهٔ مخزن پنل از GitHub دریافت نشد — اتصال اینترنت را بررسی و دوباره تلاش کنید')
+/**
+ * Newest commit that should be deployed for a connected GitHub branch.
+ *
+ * Deliberately best-effort. A Cloudflare Worker shares its egress IP with other
+ * tenants and GitHub rate-limits unauthenticated calls per IP, so this lookup
+ * really does answer HTTP 403 (the exact "403" users saw) even though the token
+ * and the deploy are perfectly fine. Railway is already connected to the repo
+ * and can build the branch HEAD without a pinned sha, so a failed lookup must
+ * never fail the deployment: it returns `{ sha: null }` and the caller deploys
+ * the branch HEAD instead.
+ */
+async function latestPanelCommit(
+  panel: PanelSpec,
+  branch = 'main',
+): Promise<{ sha: string | null; url: string | null }> {
+  const endpoint = `https://api.github.com/repos/${panel.repo}/commits/${encodeURIComponent(branch)}`
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(endpoint, {
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'miliconfig-panel-deployer' },
+        signal: AbortSignal.timeout(8000),
+      })
+      if (response.ok) {
+        const data = (await response.json().catch(() => null)) as { sha?: string; html_url?: string } | null
+        if (data?.sha) {
+          return { sha: data.sha, url: data.html_url ?? `https://github.com/${panel.repo}/commit/${data.sha}` }
+        }
+        break
+      }
+      // 403/429 mean rate limited — retrying immediately cannot help, so stop
+      // and let the caller deploy the branch HEAD. Anything else gets one more
+      // try in case it was a transient 5xx/timeout.
+      if (response.status === 403 || response.status === 429) return { sha: null, url: panel.url }
+    } catch {
+      /* offline / timeout → one more try */
+    }
   }
-  if (!response.ok) {
-    throw new RailwayApiError(`دریافت آخرین نسخهٔ ${panel.name} از GitHub ناموفق بود (HTTP ${response.status})`)
+  return { sha: null, url: panel.url }
+}
+
+/** Trigger a build of the service; pins `commitSha` when we know it, else HEAD. */
+async function triggerRailwayDeploy(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+  commitSha: string | null,
+): Promise<string> {
+  const mutation = commitSha
+    ? 'mutation ($serviceId: String!, $environmentId: String!, $commitSha: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }'
+    : 'mutation ($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }'
+  const variables: Record<string, unknown> = { serviceId, environmentId }
+  if (commitSha) variables.commitSha = commitSha
+  const data = await gql(token, mutation, variables)
+  const deploymentId = data.serviceInstanceDeployV2 as string | undefined
+  if (!deploymentId) throw new RailwayApiError('دستور استقرار آخرین نسخه روی Railway اجرا نشد')
+  return deploymentId
+}
+
+/**
+ * The newest deployment of a service, straight from Railway.
+ *
+ * `serviceCreate` in {@link deployToRailway} makes Railway build the connected
+ * repository immediately, so there is always a deployment to point at even when
+ * the explicit deploy command cannot run (a project token, a transient 403, a
+ * rate limit). Reading it back turns "the panel actually deployed but we showed
+ * an error" into a normal success.
+ */
+async function latestRailwayDeploymentId(
+  token: string,
+  projectId: string,
+  serviceId: string,
+  environmentId: string,
+  attempts = 4,
+): Promise<string | null> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const data = await gql(
+        token,
+        'query ($input: DeploymentListInput!) { deployments(input: $input, first: 1) { edges { node { id } } } }',
+        { input: { projectId, serviceId, environmentId } },
+      )
+      const edges = (data.deployments as { edges?: Array<{ node?: { id?: string } }> } | undefined)?.edges ?? []
+      const id = edges[0]?.node?.id
+      if (id) return id
+    } catch {
+      /* keep trying — Railway may still be creating the initial build */
+    }
+    if (attempt < attempts - 1) await new Promise((r) => setTimeout(r, 1500))
   }
-  const data = await response.json().catch(() => null) as { sha?: string; html_url?: string } | null
-  if (!data?.sha) throw new RailwayApiError(`آخرین commit شاخهٔ ${branch} در ${panel.repo} پیدا نشد`)
-  return { sha: data.sha, url: data.html_url ?? `https://github.com/${panel.repo}/commit/${data.sha}` }
+  return null
 }
 
 /**
@@ -432,13 +508,20 @@ export async function deployToRailway(
     { input: { projectId, serviceId, environmentId, enabled: true } },
   ).catch(() => null)
 
-  const dep = await gql(
-    token,
-    'mutation ($serviceId: String!, $environmentId: String!, $commitSha: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }',
-    { serviceId, environmentId, commitSha: latest.sha },
-  )
-  const deploymentId = dep.serviceInstanceDeployV2 as string | undefined
-  if (!deploymentId) throw new RailwayApiError('دستور استقرار آخرین نسخه روی Railway اجرا نشد')
+  // 5a. Trigger the (re)build. `serviceCreate` above already made Railway build
+  //     the connected branch, so when the explicit command is refused — a
+  //     project token, a transient 403, a rate limit — the deployment Railway
+  //     is already running is adopted instead of reporting a failure the user
+  //     would see while the panel actually deploys fine. That false failure is
+  //     exactly the bug this guards against.
+  let deploymentId: string
+  try {
+    deploymentId = await triggerRailwayDeploy(token, serviceId, environmentId, latest.sha)
+  } catch (err) {
+    const existing = await latestRailwayDeploymentId(token, projectId, serviceId, environmentId)
+    if (!existing) throw err
+    deploymentId = existing
+  }
 
   return {
     projectId,
@@ -464,7 +547,7 @@ export async function updateRailwayPanel(
   environmentId: string,
   panel: PanelSpec,
   branch = 'main',
-): Promise<{ deploymentId: string; commitSha: string; commitUrl: string }> {
+): Promise<{ deploymentId: string; commitSha: string | null; commitUrl: string | null }> {
   const latest = await latestPanelCommit(panel, branch)
   // Non-fatal for the same reason as in deployToRailway: the deploy command
   // itself below is what the user is waiting on.
@@ -473,13 +556,7 @@ export async function updateRailwayPanel(
     'mutation ($input: ServiceInstanceAutoDeployUpdateInput!) { serviceInstanceAutoDeployUpdate(input: $input) { enabled } }',
     { input: { projectId, serviceId, environmentId, enabled: true } },
   ).catch(() => null)
-  const data = await gql(
-    token,
-    'mutation ($serviceId: String!, $environmentId: String!, $commitSha: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }',
-    { serviceId, environmentId, commitSha: latest.sha },
-  )
-  const deploymentId = data.serviceInstanceDeployV2 as string | undefined
-  if (!deploymentId) throw new RailwayApiError('استقرار آخرین نسخه روی Railway آغاز نشد')
+  const deploymentId = await triggerRailwayDeploy(token, serviceId, environmentId, latest.sha)
   return { deploymentId, commitSha: latest.sha, commitUrl: latest.url }
 }
 
