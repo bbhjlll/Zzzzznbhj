@@ -17,6 +17,7 @@ import {
   panelDataDir,
   panelDataFile,
   panelTcpPorts,
+  railwayMultiRegionConfig,
   resolveRailwayRegion,
   type PanelSpec,
 } from '../shared/panels'
@@ -287,11 +288,69 @@ async function triggerRailwayDeploy(
 }
 
 /**
+ * The *committed* deploy config Railway holds for one service instance.
+ *
+ * Read from `environment(id).config` — the configuration a service's next
+ * deployment will go out with. This is the only surface that answers the region
+ * for a service on Railway's multi-region model: `serviceInstance.region` is the
+ * legacy single-region field and stays `null` forever for such a service, which
+ * is why the previous read-back could never detect a region that was not
+ * applied. A deployment's own `meta.serviceManifest.deploy` carries the same
+ * shape but is a snapshot frozen at deploy time, so it cannot confirm a change
+ * made *before* the next deploy.
+ */
+interface CommittedDeployConfig {
+  multiRegionConfig?: Record<string, { numReplicas?: number } | null> | null
+  /** Legacy single-region field, still used by services created before 2024. */
+  region?: string | null
+}
+
+async function readCommittedDeployConfig(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+): Promise<CommittedDeployConfig | null> {
+  const data = await gql(
+    token,
+    'query ($environmentId: String!) { environment(id: $environmentId) { config } }',
+    { environmentId },
+  )
+  const config = (data.environment as { config?: unknown } | undefined)?.config
+  const services = (config as { services?: Record<string, unknown> } | null | undefined)?.services
+  const deploy = (services?.[serviceId] as { deploy?: CommittedDeployConfig } | undefined)?.deploy
+  return deploy ?? null
+}
+
+/**
+ * The single region a `multiRegionConfig` pins, or null when it holds none.
+ *
+ * A zero-replica entry is how Railway (and its CLI) removes a region, so those
+ * are skipped; when more than one region is still configured the first is
+ * reported, which is enough for the mismatch check below.
+ */
+function regionFromMultiRegionConfig(
+  multiRegionConfig: CommittedDeployConfig['multiRegionConfig'],
+): string | null {
+  if (!multiRegionConfig || typeof multiRegionConfig !== 'object') return null
+  for (const [region, config] of Object.entries(multiRegionConfig)) {
+    if (!region) continue
+    if (config && typeof config.numReplicas === 'number' && config.numReplicas <= 0) continue
+    if (config === null) continue
+    return region
+  }
+  return null
+}
+
+/**
  * Read the region a service instance is configured with, straight from Railway.
  *
  * Best-effort by design: this is a *verification* step, and an API surface that
  * cannot answer it must not fail an otherwise valid deployment. `null` means
  * "could not be determined", which callers treat differently from a mismatch.
+ *
+ * `multiRegionConfig` first (what we and the dashboard both write), then the
+ * legacy single-region field, then the legacy `serviceInstance.region` probe for
+ * the oldest services.
  */
 async function readRailwayServiceRegion(
   token: string,
@@ -299,6 +358,10 @@ async function readRailwayServiceRegion(
   environmentId: string,
 ): Promise<string | null> {
   try {
+    const deploy = await readCommittedDeployConfig(token, serviceId, environmentId)
+    const fromConfig = regionFromMultiRegionConfig(deploy?.multiRegionConfig)
+    if (fromConfig) return fromConfig
+    if (deploy?.region) return deploy.region
     const data = await gql(
       token,
       'query ($serviceId: String!, $environmentId: String!) { serviceInstance(serviceId: $serviceId, environmentId: $environmentId) { region } }',
@@ -314,17 +377,22 @@ async function readRailwayServiceRegion(
 /**
  * Point a service instance at a region and **prove Railway accepted it**.
  *
- * This is deliberately not best-effort. Railway rejects an unknown region
- * identifier inside `serviceInstanceUpdate` while still answering HTTP 200 with
- * an `errors` array, and a service whose region change was refused simply keeps
- * running in the workspace's preferred region (America for most accounts).
- * Swallowing that error is what made a deploy "set to the Netherlands" land in
- * America, so a refusal — or a read-back that shows a *different* region than
- * the one requested — now surfaces as a clear error instead.
+ * The write goes through `multiRegionConfig`, not `serviceInstanceUpdate.input
+ * .region`. Both are accepted by the live API, but on a service using Railway's
+ * multi-region model — every service this app creates — the `region` scalar is a
+ * silent no-op: the mutation answers `true`, `serviceInstance.region` stays
+ * `null`, the committed `multiRegionConfig` keeps whatever the workspace put
+ * there (`{"sfo":{"numReplicas":1}}` for a US-preferred account) and the
+ * container therefore keeps running in America. That is the exact bug this
+ * fixes: "asked for the Netherlands, deployed to America".
  *
- * A region Railway reports in its short form (`europe-west4` for
- * `europe-west4-drams3a`) is normalised before comparing, so the two spellings
- * of the same region never look like a mismatch.
+ * Verification is deliberately not best-effort. A refusal — or a read-back that
+ * shows a *different* region than the one requested — surfaces as a clear error
+ * instead of a deploy that silently runs on another continent.
+ *
+ * A region Railway reports in one of its other spellings (the short id `sfo`, or
+ * a superseded name like `europe-west4`) is normalised before comparing, so the
+ * different names for the same region never look like a mismatch.
  */
 async function applyRailwayRegion(
   token: string,
@@ -341,7 +409,7 @@ async function applyRailwayRegion(
   await gql(
     token,
     'mutation ($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }',
-    { serviceId, environmentId, input: { region: wanted } },
+    { serviceId, environmentId, input: { multiRegionConfig: railwayMultiRegionConfig(wanted) } },
   )
   const observed = await readRailwayServiceRegion(token, serviceId, environmentId)
   if (observed) {
@@ -707,36 +775,38 @@ export interface RailwayServiceSettings {
 }
 
 interface ServiceEdgeState {
-  region?: string | null
   edgeConfig?: { enabled?: boolean | null; caching?: { mode?: string | null } | null } | null
 }
 
 /**
  * Read the settings Railway exposes through a plain query.
  *
- * Only fields confirmed in Railway's public API are requested — an unknown
- * field fails the whole GraphQL query, which would lose the region too. Serverless
- * and outbound IPv6 have no documented read field, so those come from our own
- * record (see `panel-deploy.ts`).
+ * The region comes from the committed deploy config ({@link readRailwayServiceRegion}),
+ * never from `serviceInstance.region` — that legacy field answers `null` for
+ * every service on Railway's multi-region model, so the settings card used to
+ * show "unknown" for a region that was in fact pinned. Serverless and outbound
+ * IPv6 have no documented read field, so those come from our own record (see
+ * `panel-deploy.ts`).
  */
 export async function readRailwayServiceSettings(
   token: string,
   serviceId: string,
   environmentId: string,
 ): Promise<RailwayServiceSettings> {
+  const region = await readRailwayServiceRegion(token, serviceId, environmentId)
+  let cdnEnabled: boolean | null = null
   try {
     const data = await gql(
       token,
-      'query ($serviceId: String!, $environmentId: String!) { serviceInstance(serviceId: $serviceId, environmentId: $environmentId) { region edgeConfig { enabled caching { mode } } } }',
+      'query ($serviceId: String!, $environmentId: String!) { serviceInstance(serviceId: $serviceId, environmentId: $environmentId) { edgeConfig { enabled caching { mode } } } }',
       { serviceId, environmentId },
     )
-    const inst = data.serviceInstance as ServiceEdgeState | undefined
-    const edge = inst?.edgeConfig
-    const cdnEnabled = edge ? Boolean(edge.enabled) && (edge.caching?.mode ?? '').toLowerCase() !== 'off' : null
-    return { region: inst?.region ?? null, cdnEnabled }
+    const edge = (data.serviceInstance as ServiceEdgeState | undefined)?.edgeConfig
+    cdnEnabled = edge ? Boolean(edge.enabled) && (edge.caching?.mode ?? '').toLowerCase() !== 'off' : null
   } catch {
-    return { region: null, cdnEnabled: null }
+    /* CDN state is best-effort; the region above is what the card leads with */
   }
+  return { region, cdnEnabled }
 }
 
 /** What actually happened to a settings change, so the UI can tell the truth. */

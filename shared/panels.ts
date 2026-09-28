@@ -344,23 +344,27 @@ export function panelBranch(panel: PanelSpec): string {
  * Railway region every panel deploys to unless the caller asks otherwise.
  *
  * `europe-west4-drams3a` is Railway's **EU West (Metal) — Amsterdam, the
- * Netherlands** region and the exact identifier from Railway's own region table
- * (docs.railway.com/deployments/regions). The single default used by the bot,
- * the web wizard and the API, so no deploy path can silently fall back to the
- * US.
+ * Netherlands** region and the exact `name` from Railway's own region table
+ * (read live from `{ regions { id name country region } }`). It is the single
+ * default used by the bot, the web wizard and the API, so no deploy path can
+ * silently fall back to the US.
  *
- * It *must* be the identifier, not the older short code (`europe-west4`). The
- * live API no longer accepts the short codes in
- * `serviceInstanceUpdate.input.region`: the mutation is rejected and the service
- * quietly stays in the workspace's own preferred region — which for most
- * accounts is the US, so a deploy that asked for the Netherlands landed in
- * America while the UI reported the Netherlands.
+ * A region is pinned through **`multiRegionConfig`**, never through the legacy
+ * `serviceInstanceUpdate.input.region` scalar: the API still *accepts* the
+ * scalar (it answers `true`) but it has no effect on a service using Railway's
+ * multi-region model — which is every service this app creates. That silent
+ * no-op is exactly why a deploy "set to the Netherlands" landed in the
+ * workspace's own preferred region, America for most accounts. See
+ * `worker/railway.ts#applyRailwayRegion`.
  */
 export const DEFAULT_RAILWAY_REGION = 'europe-west4-drams3a'
 
 /** One selectable Railway deployment region. */
 export interface RailwayRegion {
-  /** Region identifier accepted by `serviceInstanceUpdate.input.region`. */
+  /**
+   * Region `name` used as the key of `multiRegionConfig` — Railway's own region
+   * identifier, e.g. `europe-west4-drams3a`.
+   */
   id: string
   /** Persian label shown in the pickers. */
   label: string
@@ -384,19 +388,38 @@ export const RAILWAY_REGIONS: RailwayRegion[] = [
 ]
 
 /**
- * Short region codes earlier releases of this app stored and sent → the
- * identifier Railway accepts today.
+ * Every other spelling of a region that reaches us → the region `name` we pin.
  *
- * Railway renamed its regions when it moved to the "metal" fleet. Records in our
- * own database (and any caller still sending the old code) are translated here
- * instead of being rejected, so an existing deployment card keeps working and a
- * stale value can never silently become "America". A code that is neither a
+ * Two families live here: Railway's own short ids (`sfo`, `ams` — what the
+ * dashboard writes into a brand-new service's `multiRegionConfig`), and the
+ * region names Railway has since superseded (`europe-west4`, `us-east4`, …).
+ * Both are translated instead of rejected, so a record written by an older build
+ * of this app, by the dashboard, or by an API caller still resolves to the right
+ * region and can never silently become "America". A code that is neither a
  * current identifier nor listed here is genuinely unsupported and is refused.
  */
 export const RAILWAY_REGION_ALIASES: Record<string, string> = {
+  // Railway's own short region ids — what the dashboard writes into a fresh
+  // service's `multiRegionConfig` (`{"sfo":{"numReplicas":1}}`), so they turn
+  // up as the *observed* region and must compare equal to the region we asked
+  // for instead of looking like a mismatch.
+  ams: 'europe-west4-drams3a',
+  sfo: 'us-west2',
+  iad: 'us-east4-eqdc4a',
+  sin: 'asia-southeast1-eqsg3a',
+  pdx: 'us-west1',
+  // Superseded names of the same regions (marked deprecated in Railway's region
+  // table) — a deployment made before this app pinned regions keeps working and
+  // is reported with the right name.
   'europe-west4': 'europe-west4-drams3a',
+  'europe-west4-drams11a': 'europe-west4-drams3a',
+  'us-west2-aws': 'us-west2',
+  'us-west2-cssv9a': 'us-west2',
   'us-east4': 'us-east4-eqdc4a',
+  'us-east-1': 'us-east4-eqdc4a',
+  'us-east4-eqdc16a': 'us-east4-eqdc4a',
   'asia-southeast1': 'asia-southeast1-eqsg3a',
+  'asia-southeast1-drsin10a': 'asia-southeast1-eqsg3a',
 }
 
 /**
@@ -407,12 +430,23 @@ export const RAILWAY_REGION_ALIASES: Record<string, string> = {
 export const RAILWAY_REGION_LABELS: Record<string, string> = {
   'europe-west4-drams3a': 'هلند (آمستردام)',
   'europe-west4': 'هلند (آمستردام)',
+  'europe-west4-drams11a': 'هلند (آمستردام)',
+  ams: 'هلند (آمستردام)',
   'us-west2': 'آمریکا (کالیفرنیا)',
+  'us-west2-aws': 'آمریکا (کالیفرنیا)',
+  'us-west2-cssv9a': 'آمریکا (کالیفرنیا)',
+  sfo: 'آمریکا (کالیفرنیا)',
   'us-west1': 'آمریکا (اورگان)',
+  pdx: 'آمریکا (اورگان)',
   'us-east4-eqdc4a': 'آمریکا (ویرجینیا)',
   'us-east4': 'آمریکا (ویرجینیا)',
+  'us-east-1': 'آمریکا (ویرجینیا)',
+  'us-east4-eqdc16a': 'آمریکا (ویرجینیا)',
+  iad: 'آمریکا (ویرجینیا)',
   'asia-southeast1-eqsg3a': 'سنگاپور',
   'asia-southeast1': 'سنگاپور',
+  'asia-southeast1-drsin10a': 'سنگاپور',
+  sin: 'سنگاپور',
 }
 
 /**
@@ -421,7 +455,7 @@ export const RAILWAY_REGION_LABELS: Record<string, string> = {
  * translated rather than rejected).
  *
  * Every path that talks to Railway goes through this, so a short code from an
- * old record or an API caller can never reach `serviceInstanceUpdate` as-is.
+ * old record or an API caller can never reach Railway as-is.
  */
 export function resolveRailwayRegion(region?: string | null): string | null {
   const code = (region ?? '').trim().toLowerCase()
@@ -439,6 +473,21 @@ export function railwayRegionLabel(region?: string | null): string {
 /** Is this a region code we offer? (Keeps a bad request away from Railway.) */
 export function isRailwayRegion(region: string): boolean {
   return resolveRailwayRegion(region) !== null
+}
+
+/**
+ * Railway's `multiRegionConfig` value that pins a service to exactly one region.
+ *
+ * This is the *only* shape Railway applies: the map is replaced wholesale, so
+ * the single entry also drops the region the workspace had put the service in
+ * (`{"sfo":{"numReplicas":1}}` for a US-preferred account). Committed through
+ * `serviceInstanceUpdate.input.multiRegionConfig`.
+ */
+export function railwayMultiRegionConfig(
+  region: string,
+  numReplicas = 1,
+): Record<string, { numReplicas: number }> {
+  return { [region]: { numReplicas } }
 }
 
 /** Generated and user-specific values used to build a deployment manifest. */
