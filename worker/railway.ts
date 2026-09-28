@@ -393,7 +393,21 @@ async function readRailwayServiceRegion(
  * A region Railway reports in one of its other spellings (the short id `sfo`, or
  * a superseded name like `europe-west4`) is normalised before comparing, so the
  * different names for the same region never look like a mismatch.
+ *
+ * The write is **retried until the committed config agrees**, because a
+ * brand-new service is not ready for it yet: `serviceCreate` makes Railway
+ * commit the service's own initial deploy config a moment later, taken from the
+ * workspace's preferred region, and when that lands after our write it wins —
+ * verified against the live API, where a deploy asked for Amsterdam, wrote
+ * Amsterdam, and then read back San Francisco until it gave up. Re-sending the
+ * write until the config holds the region we asked for closes that race; the
+ * alternative (one write, then hope) is what put panels in America.
  */
+export const REGION_WRITE_ATTEMPTS = 5
+
+/** Pause before re-sending a region write Railway has not committed yet. */
+const REGION_RETRY_MS = 900
+
 async function applyRailwayRegion(
   token: string,
   serviceId: string,
@@ -406,19 +420,33 @@ async function applyRailwayRegion(
       `منطقهٔ «${region}» را Railway پشتیبانی نمی‌کند — یکی از منطقه‌های فهرست (هلند/آمریکا/سنگاپور) را انتخاب کنید`,
     )
   }
-  await gql(
-    token,
-    'mutation ($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }',
-    { serviceId, environmentId, input: { multiRegionConfig: railwayMultiRegionConfig(wanted) } },
-  )
-  const observed = await readRailwayServiceRegion(token, serviceId, environmentId)
-  if (observed) {
-    const observedCanonical = resolveRailwayRegion(observed) ?? observed
-    if (observedCanonical !== wanted) {
-      throw new RailwayApiError(
-        `Railway منطقهٔ درخواستی (${wanted}) را اعمال نکرد و سرویس روی ${observed} ماند — دوباره تلاش کنید یا منطقه را از داشبورد Railway عوض کنید`,
-      )
+
+  // A region Railway reports in a spelling we did not send — a stale committed
+  // value, or the workspace default — is only ever reported once every attempt
+  // has failed to change it.
+  let refused: string | null = null
+  for (let attempt = 0; attempt < REGION_WRITE_ATTEMPTS; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, REGION_RETRY_MS))
+    await gql(
+      token,
+      'mutation ($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }',
+      { serviceId, environmentId, input: { multiRegionConfig: railwayMultiRegionConfig(wanted) } },
+    )
+    const observed = await readRailwayServiceRegion(token, serviceId, environmentId)
+    // An unreadable config is not a refusal: this is a verification step, and it
+    // must not fail a deploy that may well be correct.
+    if (!observed) {
+      if (refused) break
+      return wanted
     }
+    if ((resolveRailwayRegion(observed) ?? observed) === wanted) return wanted
+    refused = observed
+  }
+
+  if (refused) {
+    throw new RailwayApiError(
+      `Railway منطقهٔ درخواستی (${wanted}) را اعمال نکرد و سرویس روی ${refused} ماند — دوباره تلاش کنید یا منطقه را از داشبورد Railway عوض کنید`,
+    )
   }
   return wanted
 }
@@ -669,6 +697,16 @@ export async function deployToRailway(
     { input: { projectId, serviceId, environmentId, enabled: true } },
   ).catch(() => null)
 
+  // 5-pre. Assert the region one last time, immediately before the build is
+  //        requested. A brand-new service receives its own initial deploy config
+  //        from Railway a moment after `serviceCreate`, and that config — the
+  //        workspace's preferred region, America for most accounts — overwrites
+  //        whatever was written before it landed. Re-asserting here (instead of
+  //        once, early) is what makes the deployed container actually come up in
+  //        the region the user chose. The volume above already follows the
+  //        region, so this only ever re-confirms the same one.
+  await applyRailwayRegion(token, serviceId, environmentId, region)
+
   // 5a. Trigger the (re)build. `serviceCreate` above already made Railway build
   //     the connected branch, so when the explicit command is refused — a
   //     project token, a transient 403, a rate limit — the deployment Railway
@@ -779,6 +817,33 @@ interface ServiceEdgeState {
 }
 
 /**
+ * The caching mode Railway treats as "CDN off". Verified against the live API:
+ * `updateServiceEdgeConfig` with this mode is the only way to actually disable
+ * the cache (`disableServiceCdn` answers `true` and changes nothing).
+ */
+const CDN_OFF_MODE = 'off'
+
+/** Is CDN caching on for this service? `null` when Railway will not answer. */
+async function readRailwayEdgeEnabled(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+): Promise<boolean | null> {
+  try {
+    const data = await gql(
+      token,
+      'query ($serviceId: String!, $environmentId: String!) { serviceInstance(serviceId: $serviceId, environmentId: $environmentId) { edgeConfig { enabled caching { mode } } } }',
+      { serviceId, environmentId },
+    )
+    const edge = (data.serviceInstance as ServiceEdgeState | undefined)?.edgeConfig
+    if (!edge) return null
+    return Boolean(edge.enabled) && (edge.caching?.mode ?? '').toLowerCase() !== CDN_OFF_MODE
+  } catch {
+    return null
+  }
+}
+
+/**
  * Read the settings Railway exposes through a plain query.
  *
  * The region comes from the committed deploy config ({@link readRailwayServiceRegion}),
@@ -793,19 +858,10 @@ export async function readRailwayServiceSettings(
   serviceId: string,
   environmentId: string,
 ): Promise<RailwayServiceSettings> {
-  const region = await readRailwayServiceRegion(token, serviceId, environmentId)
-  let cdnEnabled: boolean | null = null
-  try {
-    const data = await gql(
-      token,
-      'query ($serviceId: String!, $environmentId: String!) { serviceInstance(serviceId: $serviceId, environmentId: $environmentId) { edgeConfig { enabled caching { mode } } } }',
-      { serviceId, environmentId },
-    )
-    const edge = (data.serviceInstance as ServiceEdgeState | undefined)?.edgeConfig
-    cdnEnabled = edge ? Boolean(edge.enabled) && (edge.caching?.mode ?? '').toLowerCase() !== 'off' : null
-  } catch {
-    /* CDN state is best-effort; the region above is what the card leads with */
-  }
+  const [region, cdnEnabled] = await Promise.all([
+    readRailwayServiceRegion(token, serviceId, environmentId),
+    readRailwayEdgeEnabled(token, serviceId, environmentId),
+  ])
   return { region, cdnEnabled }
 }
 
@@ -832,8 +888,11 @@ export interface RailwaySettingsResult {
  *  • `ipv6Egress` → `environmentPatchCommit`: Railway models outbound IPv6 as an
  *    environment config change, and committing that patch also triggers the
  *    redeploy the toggle needs.
- *  • `cdnEnabled` → `enableServiceCdn` / `disableServiceCdn` (needs an applied
- *    public domain, which a deployed panel always has).
+ *  • `cdnEnabled` → `enableServiceCdn` to turn it on, and `updateServiceEdgeConfig`
+ *    with `caching.mode = "off"` to turn it off. **Not** `disableServiceCdn`:
+ *    verified against the live API, that mutation answers `true` and leaves the
+ *    cache exactly as it was, so the toggle only ever appeared to work in one
+ *    direction. Needs an applied public domain, which a deployed panel has.
  *
  * Region and serverless are sent as **separate** mutations on purpose. Railway
  * fails the whole `serviceInstanceUpdate` for a single unknown field, and its
@@ -884,15 +943,43 @@ export async function updateRailwayServiceSettings(
     if (opts.cdnEnabled) {
       await gql(
         token,
-        'mutation ($input: EnableServiceCdnInput!) { enableServiceCdn(input: $input) { id enabled } }',
+        'mutation ($input: EnableServiceCdnInput!) { enableServiceCdn(input: $input) { enabled caching { mode } } }',
         { input: { serviceId: opts.serviceId, environmentId: opts.environmentId } },
       )
     } else {
+      // The caching *mode* is the switch Railway actually honours (`off` is what
+      // the read above treats as disabled); `disableServiceCdn` is a no-op that
+      // still answers `true`.
       await gql(
         token,
-        'mutation ($input: DisableServiceCdnInput!) { disableServiceCdn(input: $input) }',
-        { input: { serviceId: opts.serviceId, environmentId: opts.environmentId } },
+        'mutation ($input: UpdateServiceEdgeConfigInput!) { updateServiceEdgeConfig(input: $input) { enabled caching { mode } } }',
+        {
+          input: {
+            serviceId: opts.serviceId,
+            environmentId: opts.environmentId,
+            config: { caching: { mode: CDN_OFF_MODE } },
+          },
+        },
       )
+    }
+    // Verify rather than trust: a mutation Railway accepted is not the same as a
+    // setting that changed, which is the whole lesson of this file.
+    let cdn = await readRailwayEdgeEnabled(token, opts.serviceId, opts.environmentId)
+    if (cdn !== null && cdn !== opts.cdnEnabled) {
+      await gql(
+        token,
+        opts.cdnEnabled
+          ? 'mutation ($input: EnableServiceCdnInput!) { enableServiceCdn(input: $input) { enabled caching { mode } } }'
+          : 'mutation ($input: UpdateServiceEdgeConfigInput!) { updateServiceEdgeConfig(input: $input) { enabled caching { mode } } }',
+        opts.cdnEnabled
+          ? { input: { serviceId: opts.serviceId, environmentId: opts.environmentId } }
+          : { input: { serviceId: opts.serviceId, environmentId: opts.environmentId, config: { caching: { mode: CDN_OFF_MODE } } } },
+      )
+      cdn = await readRailwayEdgeEnabled(token, opts.serviceId, opts.environmentId)
+    }
+    if (cdn !== null && cdn !== opts.cdnEnabled) {
+      const reason = `Railway وضعیت CDN را تغییر نداد و همچنان ${cdn ? 'روشن' : 'خاموش'} است`
+      result.warning = result.warning ? `${result.warning} — ${reason}` : reason
     }
   }
 

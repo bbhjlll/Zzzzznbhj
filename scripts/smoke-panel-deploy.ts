@@ -286,6 +286,8 @@ async function main() {
     // Complete manifest + RAILWAY_RUN_UID. Every write skips its own deploy.
     {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
     { serviceInstanceAutoDeployUpdate: { enabled: true } },          // future GitHub pushes
+    {},                                                             // region re-assert before the build
+    { environment: { config: { services: { svc1: { deploy: { multiRegionConfig: { 'europe-west4-drams3a': { numReplicas: 1 } } } } } } } },
     { serviceInstanceDeployV2: 'dep1' },                            // exact latest commit
   ]
   r = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'my-app', panel })
@@ -620,6 +622,8 @@ async function main() {
     { tcpProxyCreate: { id: 'tcp3', domain: 'p3.rlwy.net', proxyPort: 23179, applicationPort: 8448 } },
     ...Array.from({ length: 11 }, () => ({})),
     { serviceInstanceAutoDeployUpdate: { enabled: true } },
+    {},                                                             // region re-assert before the build
+    { environment: { config: { services: { [ids.svc]: { deploy: { multiRegionConfig: { 'europe-west4-drams3a': { numReplicas: 1 } } } } } } } },
   ]
   githubQueue = [{ __status: 403 }]
   gqlQueue = [...railwayPreamble({ prj: 'prjR', env: 'envR', svc: 'svcR' }), { serviceInstanceDeployV2: 'dep-head' }]
@@ -660,7 +664,10 @@ async function main() {
     { serviceInstanceDeployV2: 'set1-move' },                       // redeploy that moves it
     {},                                                             // serverless
     {},                                                             // environmentPatchCommit (IPv6)
-    { enableServiceCdn: { id: 'cdn1', enabled: true } },            // CDN
+    { enableServiceCdn: { enabled: true, caching: { mode: 'auto' } } }, // CDN on
+    // The write is verified, not trusted: `disableServiceCdn` used to answer
+    // `true` while changing nothing, so the state is read back after every write.
+    { serviceInstance: { edgeConfig: { enabled: true, caching: { mode: 'auto' } } } },
   ]
   const applied = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', {
     region: 'us-west2',
@@ -717,10 +724,30 @@ async function main() {
   check('CDN enabled through enableServiceCdn', calls.some((c) => (c.body ?? '').includes('enableServiceCdn')))
   check('settings change logged', [...env.tables.activity_logs.values()].some((l) => l['action'] === 'panel_settings_changed'))
 
-  gqlQueue = [{}]
+  // Turning it off goes through the caching mode: `disableServiceCdn` is a
+  // mutation Railway accepts and ignores (it answers `true`, cache unchanged),
+  // so it must never be the thing we rely on.
+  gqlQueue = [
+    { updateServiceEdgeConfig: { enabled: true, caching: { mode: 'off' } } }, // CDN off
+    { serviceInstance: { edgeConfig: { enabled: true, caching: { mode: 'off' } } } }, // verified off
+  ]
   const cdnOff = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { cdnEnabled: false })
-  check('CDN disabled through disableServiceCdn', cdnOff.ok === true && calls.some((c) => (c.body ?? '').includes('disableServiceCdn')), JSON.stringify(cdnOff))
+  const offBody = calls.map((c) => c.body ?? '').find((b) => b.includes('updateServiceEdgeConfig')) ?? ''
+  check('CDN disabled through the caching mode', cdnOff.ok === true && offBody.includes('"mode":"off"'), offBody.slice(0, 200))
+  check('the ignored disableServiceCdn mutation is never used', !calls.some((c) => (c.body ?? '').includes('disableServiceCdn')))
+  check('a CDN change that did not stick is a warning, not a silent success', cdnOff.warning === null || typeof cdnOff.warning === 'string')
   check('CDN flag persisted off', env.tables.railway_deploys.get('set1')?.['cdn_enabled'] === 0)
+
+  // The exact failure that started this: Railway accepts the mutation and the
+  // setting does not change. That must surface as a warning, never as success.
+  gqlQueue = [
+    { updateServiceEdgeConfig: { enabled: true, caching: { mode: 'auto' } } },
+    { serviceInstance: { edgeConfig: { enabled: true, caching: { mode: 'auto' } } } },
+    { updateServiceEdgeConfig: { enabled: true, caching: { mode: 'auto' } } },
+    { serviceInstance: { edgeConfig: { enabled: true, caching: { mode: 'auto' } } } },
+  ]
+  const cdnStuck = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { cdnEnabled: false })
+  check('a CDN change Railway ignores is reported', cdnStuck.ok === true && !!cdnStuck.warning, JSON.stringify(cdnStuck))
 
   console.log('18) a region Railway refuses is a loud failure, not a silent fallback')
   // Railway answers HTTP 200 and reports a different region: the exact shape of
@@ -757,6 +784,36 @@ async function main() {
   const warnOnly = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { region: 'asia-southeast1' })
   check('a failed redeploy is a warning, not a lost setting', warnOnly.ok === true && !!warnOnly.warning, JSON.stringify(warnOnly))
   check('the applied region is still recorded', env.tables.railway_deploys.get('set1')?.['region'] === 'asia-southeast1-eqsg3a', String(env.tables.railway_deploys.get('set1')?.['region']))
+
+  console.log('19) a fresh service has its own region seeded — the write must win')
+  // Verified against the live API: `serviceCreate` makes Railway commit the
+  // service's initial deploy config a moment later, taken from the workspace's
+  // preferred region. When that lands after our write it wins, and the deploy
+  // used to be reported as "asked for Amsterdam, stayed on San Francisco". The
+  // region write is therefore retried until the committed config agrees.
+  githubQueue = [{ sha: 'racesha', html_url: 'https://github.com/miladjahani/Mizetusi/commit/racesha' }]
+  const racePre = railwayPreamble({ prj: 'prjRace', env: 'envRace', svc: 'svcRace' })
+  const raceConfig = (region: string) => ({
+    environment: { config: { services: { svcRace: { deploy: { multiRegionConfig: { [region]: { numReplicas: 1 } } } } } } },
+  })
+  gqlQueue = [
+    ...racePre.slice(0, 7),         // …through the first region write
+    raceConfig('sfo'),              // first read-back: Railway's seed won
+    {},                            // re-send the write
+    raceConfig('europe-west4-drams3a'), // second read-back: it stuck
+    ...racePre.slice(8),           // domain, volume, token, proxies, env, re-assert
+    { serviceInstanceDeployV2: 'race-dep' },
+  ]
+  const raced = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'region-race', panel })
+  check('a region seeded after our write does not fail the deploy', raced.ok === true, JSON.stringify(raced).slice(0, 200))
+  if (raced.ok) {
+    check('the deploy records the region we asked for', raced.region === 'europe-west4-drams3a', String(raced.region))
+    check('the row records the region we asked for', env.tables.railway_deploys.get('race-dep')?.['region'] === 'europe-west4-drams3a')
+  }
+  const raceWrites = calls
+    .map((c) => c.body ?? '')
+    .filter((b) => b.includes('multiRegionConfig') && b.includes('europe-west4-drams3a')).length
+  check('the region write was re-sent until it stuck', raceWrites >= 3, String(raceWrites))
 
   const badRegion = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { region: 'mars-1' })
   check('unknown region refused before hitting Railway', badRegion.ok === false, JSON.stringify(badRegion))
