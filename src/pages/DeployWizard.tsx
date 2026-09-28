@@ -165,6 +165,10 @@ export default function DeployWizard() {
   // kept in a ref so the status poller can label the result when it succeeds.
   const railAdminRef = useRef<{ user: string; pass: string } | null>(null)
 
+  // Region Railway *confirmed* for the running deploy (from `POST /railway/deploy`),
+  // so the success message names the real location instead of the requested one.
+  const railRegionRef = useRef<string | null>(null)
+
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current)
@@ -314,7 +318,7 @@ export default function DeployWizard() {
             success: true,
             message: url
               ? (admin
-                  ? `${PANEL.name} در ${railwayRegionLabel(DEFAULT_RAILWAY_REGION)} مستقر شد و ادمین پنل ساخته شد! 🎉`
+                  ? `${PANEL.name} در ${railRegionRef.current ?? railwayRegionLabel(DEFAULT_RAILWAY_REGION)} مستقر شد و ادمین پنل ساخته شد! 🎉`
                   : `${PANEL.name} با موفقیت روی Railway مستقر شد! 🎉`)
               : 'استقرار روی Railway موفق بود — دامنه را در بخش Networking پروژه فعال کنید.',
             url: url ?? undefined,
@@ -398,11 +402,12 @@ export default function DeployWizard() {
       setRailProjectUrl(null)
       setDeployLogs(['اتصال به Railway…'])
       try {
-        const { data } = await api<{ data: { deploymentId: string; projectId: string; projectUrl: string; domain?: string; admin_username?: string; admin_password?: string } }>('/railway/deploy', {
+        const { data } = await api<{ data: { deploymentId: string; projectId: string; projectUrl: string; domain?: string; admin_username?: string; admin_password?: string; region?: string; region_label?: string } }>('/railway/deploy', {
           method: 'POST',
           body: { token_id: rt.id, name, region: DEFAULT_RAILWAY_REGION, panel: PANEL.id },
         })
         setRailProjectUrl(data.projectUrl)
+        railRegionRef.current = data.region_label ?? (data.region ? railwayRegionLabel(data.region) : null)
         if (data.admin_username && data.admin_password) {
           railAdminRef.current = { user: data.admin_username, pass: data.admin_password }
         }
@@ -410,7 +415,7 @@ export default function DeployWizard() {
           '✓ پروژه ساخته شد',
           '✓ محیط production آماده شد',
           `✓ مخزن ${PANEL.repo} (GitHub) متصل شد`,
-          `✓ منطقه: ${railwayRegionLabel(DEFAULT_RAILWAY_REGION)}`,
+          `✓ منطقهٔ تأییدشده: ${railRegionRef.current ?? railwayRegionLabel(DEFAULT_RAILWAY_REGION)}`,
           ...(data.domain ? [`✓ دامنه: ${data.domain}`] : []),
           `✓ PORT=${PANEL_PORT} تنظیم شد`,
           `✓ استقرار شروع شد (${data.deploymentId.slice(0, 8)}…)`,

@@ -12,8 +12,13 @@
  *   • بروزرسانی   → POST /panels/update  (rebuilds the service from the newest commit)
  *   • بروزرسانی خودکار → POST /panels/auto-update (scheduled sweep keeps it current)
  *   • حذف از فهرست → POST /panels/forget (forgets the record; the service keeps running)
+ *
+ * It also carries the **direct deploy** control: one click in the app starts a
+ * brand-new panel on Railway in the chosen region — the exact same engine the
+ * bot and the wizard use (worker/panel-deploy.ts) — and follows it until it is
+ * live, without a multi-step wizard in between.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Activity,
@@ -35,7 +40,7 @@ import {
   SlidersHorizontal,
   Trash2,
 } from 'lucide-react'
-import { DEFAULT_RAILWAY_REGION, RAILWAY_REGIONS, railwayRegionLabel } from '../../shared/panels'
+import { DEFAULT_RAILWAY_REGION, RAILWAY_REGIONS, railwayRegionLabel, resolveRailwayRegion } from '../../shared/panels'
 import { api } from '../lib/api'
 import type {
   HostedPanelDeploy,
@@ -43,6 +48,7 @@ import type {
   HostedPanelOverview,
   HostedPanelUpdate,
   HostedPanelWatch,
+  RailwayToken,
 } from '../lib/types'
 
 interface Props {
@@ -71,6 +77,38 @@ type SettingsPatch = {
   sleepApplication?: boolean
   ipv6Egress?: boolean
   cdnEnabled?: boolean
+}
+
+/** Shape `POST /railway/deploy` answers with (the direct deploy control). */
+interface DirectDeployResponse {
+  deploymentId: string
+  projectUrl: string
+  domain: string | null
+  admin_username: string
+  admin_password: string
+  /** Region Railway actually confirmed, plus its Persian label. */
+  region: string
+  region_label: string
+}
+
+/** Railway deployment states, translated for the log line. */
+const RAILWAY_STATE_LABEL: Record<string, string> = {
+  QUEUED: 'در صف',
+  INITIALIZING: 'در حال شروع',
+  WAITING: 'در انتظار',
+  BUILDING: 'در حال بیلد (Docker)',
+  DEPLOYING: 'در حال استقرار',
+  SUCCESS: 'موفق',
+  FAILED: 'ناموفق',
+  CRASHED: 'کرش',
+  SLEEPING: 'خواب',
+  SUCCESS_NO_DOMAIN: 'موفق — دامنه در حال ساخت',
+}
+
+/** A fresh, valid Railway project name for a direct deploy. */
+function directDeployName(): string {
+  const suffix = Math.random().toString(36).slice(2, 6)
+  return `panel-${suffix}`
 }
 
 /** One on/off row of the service-settings panel. */
@@ -124,6 +162,18 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
   const [copied, setCopied] = useState<string | null>(null)
   /** Which deployment's service-settings panel is expanded. */
   const [settingsFor, setSettingsFor] = useState<string | null>(null)
+  /** Outcome of the last settings change (a caveat the platform reported). */
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null)
+  /** The direct-deploy control: region, token, live progress and result. */
+  const [railTokens, setRailTokens] = useState<RailwayToken[]>([])
+  const [directTokenId, setDirectTokenId] = useState('')
+  const [directRegion, setDirectRegion] = useState<string>(DEFAULT_RAILWAY_REGION)
+  const [directState, setDirectState] = useState<'idle' | 'deploying' | 'live' | 'failed'>('idle')
+  const [directLog, setDirectLog] = useState<string[]>([])
+  const [directResult, setDirectResult] = useState<
+    { name: string; url: string | null; panelUrl: string | null; username: string; password: string; regionLabel: string } | null
+  >(null)
+  const directPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -141,7 +191,108 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
     void load()
   }, [load])
 
+  // The direct deploy needs a Railway credential, so the control knows up front
+  // whether it can start (and which token it would use).
+  useEffect(() => {
+    let cancelled = false
+    api<{ data: RailwayToken[] }>('/railway/tokens')
+      .then(({ data }) => {
+        if (cancelled) return
+        const active = (data ?? []).filter((t) => t.status === 'active')
+        setRailTokens(active)
+        if (active.length) setDirectTokenId((prev) => (prev && active.some((t) => t.id === prev) ? prev : active[0].id))
+      })
+      .catch(() => { if (!cancelled) setRailTokens([]) })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => () => {
+    if (directPollRef.current) clearInterval(directPollRef.current)
+  }, [])
+
   const key = (d: HostedPanelDeploy) => `${d.platform}:${d.id}`
+
+  /**
+   * The direct deploy: create the project on Railway in the selected region and
+   * follow it to "live" without leaving the page. Same API the bot uses, so the
+   * panel, the region and the credentials are created by exactly one engine.
+   */
+  const directDeploy = async () => {
+    if (directState === 'deploying') return
+    const token = railTokens.find((t) => t.id === directTokenId) ?? railTokens[0]
+    if (!token) {
+      setError('برای استقرار مستقیم ابتدا یک توکن Railway اضافه کنید')
+      return
+    }
+    if (directPollRef.current) clearInterval(directPollRef.current)
+    const projectName = directDeployName()
+    setDirectResult(null)
+    setDirectState('deploying')
+    setError(null)
+    setDirectLog([
+      'اتصال به Railway…',
+      `منطقهٔ درخواستی: ${railwayRegionLabel(directRegion)}`,
+    ])
+    try {
+      const { data } = await api<{ data: DirectDeployResponse }>('/railway/deploy', {
+        method: 'POST',
+        body: { token_id: token.id, name: projectName, region: directRegion, panel: panel?.id ?? 'mizetusi' },
+      })
+      setDirectLog((prev) => [
+        ...prev,
+        `✓ پروژهٔ «${projectName}» ساخته شد`,
+        `✓ منطقهٔ تأییدشده: ${data.region_label}`,
+        `✓ ادمین پنل: ${data.admin_username}`,
+        '',
+        'در حال بیلد روی Railway — معمولاً ۳ تا ۶ دقیقه.',
+      ])
+      await load()
+      const startedAt = Date.now()
+      const tick = async () => {
+        try {
+          const { data: res } = await api<{ data: HostedPanelWatch }>('/panels/watch', {
+            method: 'POST',
+            body: { platform: 'railway', id: data.deploymentId },
+          })
+          const label = RAILWAY_STATE_LABEL[res.status] ?? res.status
+          setDirectLog((prev) => [...prev.filter((l) => !l.startsWith('وضعیت:')), `وضعیت: ${label}`].slice(-14))
+          if (res.state === 'live') {
+            if (directPollRef.current) clearInterval(directPollRef.current)
+            directPollRef.current = null
+            setDirectState('live')
+            setDirectResult({
+              name: projectName,
+              url: res.url ?? data.domain,
+              panelUrl: res.url ? `${res.url.replace(/\/+$/, '')}${res.panelPath ?? ''}` : null,
+              username: res.adminUsername ?? data.admin_username,
+              password: res.adminPassword ?? data.admin_password,
+              regionLabel: data.region_label,
+            })
+            if (res.capabilitiesError) setError(res.capabilitiesError)
+            await load()
+          } else if (res.state === 'failed') {
+            if (directPollRef.current) clearInterval(directPollRef.current)
+            directPollRef.current = null
+            setDirectState('failed')
+            setDirectLog((prev) => [...prev, '❌ استقرار ناموفق بود — لاگ بیلد را در داشبورد Railway بررسی کنید.'])
+            await load()
+          } else if (Date.now() - startedAt > 12 * 60 * 1000) {
+            if (directPollRef.current) clearInterval(directPollRef.current)
+            directPollRef.current = null
+            setDirectState('failed')
+            setDirectLog((prev) => [...prev, '❌ زمان انتظار تمام شد — وضعیت را در داشبورد Railway ببینید.'])
+          }
+        } catch {
+          /* transient network error — keep polling */
+        }
+      }
+      void tick()
+      directPollRef.current = setInterval(tick, 4000)
+    } catch (e) {
+      setDirectState('failed')
+      setDirectLog((prev) => [...prev, `❌ ${e instanceof Error ? e.message : 'استقرار مستقیم ناموفق بود'}`])
+    }
+  }
 
   /** Poll the platform for a deploy; on the live transition the admin is bootstrapped. */
   const watch = async (d: HostedPanelDeploy) => {
@@ -220,13 +371,15 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
    * the card reflects exactly what the platform accepted.
    */
   const saveSettings = async (d: HostedPanelDeploy, patch: SettingsPatch) => {
+    setSettingsNotice(null)
     setBusy(key(d))
     try {
-      const { data: fresh } = await api<{ data: { deploys: HostedPanelDeploy[] } }>('/panels/settings', {
+      const { data: fresh } = await api<{ data: { deploys: HostedPanelDeploy[]; warning?: string | null } }>('/panels/settings', {
         method: 'POST',
         body: { platform: d.platform, id: d.id, ...patch },
       })
       setData((prev) => (prev ? { ...prev, deploys: fresh.deploys } : prev))
+      setSettingsNotice(fresh.warning ?? null)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تغییر تنظیمات ناموفق بود')
@@ -353,6 +506,116 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
           {error}
         </div>
       )}
+
+      {/* ── Direct deploy — one click, region chosen here ──────────────── */}
+      <div className="mt-5 rounded-2xl border border-brand-300/30 bg-brand-500/[0.06] p-4" data-guide="p-direct-deploy">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-white flex items-center gap-2">
+              <Rocket className="w-4 h-4 text-brand-300" /> استقرار مستقیم روی Railway
+            </p>
+            <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+              بدون ویزارد: پروژه ساخته می‌شود، منطقه دقیقاً همان چیزی است که اینجا انتخاب می‌کنید و رمز ادمین یک‌بار نمایش داده می‌شود.
+            </p>
+          </div>
+          <span className="chip" dir="ltr">
+            📍 {railwayRegionLabel(directRegion)}
+          </span>
+        </div>
+
+        {railTokens.length === 0 ? (
+          <div className="flex flex-wrap items-center gap-3 mt-3">
+            <p className="text-xs text-slate-300">
+              برای استقرار مستقیم یک توکن Railway اضافه کنید (Account Settings → Tokens).
+            </p>
+            <Link to="/tokens" className="btn-secondary text-xs">
+              <KeyRound className="w-3.5 h-3.5" /> افزودن توکن Railway
+            </Link>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 mt-3">
+            <label className="sr-only" htmlFor="direct-region">منطقهٔ استقرار</label>
+            <select
+              id="direct-region"
+              value={directRegion}
+              disabled={directState === 'deploying'}
+              onChange={(e) => setDirectRegion(e.target.value)}
+              className="bg-slate-900/70 border border-white/[0.08] rounded-lg px-2 py-2 text-xs text-slate-200 disabled:opacity-50"
+              title="منطقهٔ استقرار روی Railway"
+            >
+              {RAILWAY_REGIONS.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.label} — {r.area}
+                </option>
+              ))}
+            </select>
+            {railTokens.length > 1 && (
+              <select
+                value={directTokenId}
+                disabled={directState === 'deploying'}
+                onChange={(e) => setDirectTokenId(e.target.value)}
+                className="bg-slate-900/70 border border-white/[0.08] rounded-lg px-2 py-2 text-xs text-slate-200 disabled:opacity-50"
+                title="توکن Railway"
+              >
+                {railTokens.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              onClick={() => void directDeploy()}
+              disabled={directState === 'deploying'}
+              className="btn-primary text-sm flex items-center justify-center gap-2"
+            >
+              {directState === 'deploying' ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" /> در حال استقرار…
+                </>
+              ) : (
+                <>
+                  <Rocket className="w-4 h-4" /> استقرار مستقیم پنل
+                </>
+              )}
+            </button>
+          </div>
+        )}
+
+        {directLog.length > 0 && (
+          <pre
+            dir="ltr"
+            className="mt-3 max-h-44 overflow-auto rounded-xl bg-black/50 border border-white/[0.06] p-3 text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap"
+          >
+            {directLog.join('\n')}
+          </pre>
+        )}
+
+        {directResult && (
+          <div className="mt-3 rounded-xl border border-brand-300/30 bg-black/30 p-3 space-y-2">
+            <p className="text-xs text-brand-300 flex items-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5" /> «{directResult.name}» روی {directResult.regionLabel} زنده شد
+            </p>
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              {directResult.panelUrl && (
+                <a href={directResult.panelUrl} target="_blank" rel="noopener noreferrer" className="text-brand-300 hover:text-brand-200 inline-flex items-center gap-1" dir="ltr">
+                  <ExternalLink className="w-3.5 h-3.5" /> {directResult.panelUrl}
+                </a>
+              )}
+              <code className="text-slate-300" dir="ltr">
+                {directResult.username} / {directResult.password}
+              </code>
+              <button
+                onClick={() => copy(`${directResult.username} / ${directResult.password}`, 'direct')}
+                className="text-[11px] text-slate-400 hover:text-white px-2 py-1 rounded-lg border border-white/[0.08] inline-flex items-center gap-1"
+              >
+                {copied === 'direct' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                {copied === 'direct' ? 'کپی شد' : 'کپی رمز ادمین'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* ── Deployments ────────────────────────────────────────────────── */}
       {deploys.length === 0 ? (
@@ -576,7 +839,7 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
                         <span className="text-[10px] text-slate-500">{railwayRegionLabel(d.region ?? DEFAULT_RAILWAY_REGION)}</span>
                       </div>
                       <select
-                        value={d.region ?? DEFAULT_RAILWAY_REGION}
+                        value={resolveRailwayRegion(d.region) ?? DEFAULT_RAILWAY_REGION}
                         disabled={busyHere}
                         onChange={(e) => void saveSettings(d, { region: e.target.value })}
                         className="w-full bg-slate-900/70 border border-white/[0.08] rounded-lg px-2 py-1.5 text-xs text-slate-200 disabled:opacity-50"
@@ -617,6 +880,11 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
                     {busyHere && (
                       <p className="text-[10px] text-brand-300 flex items-center gap-1">
                         <Loader2 className="w-3 h-3 animate-spin" /> در حال اعمال…
+                      </p>
+                    )}
+                    {settingsNotice && (
+                      <p className="text-[10px] text-warning-300 leading-relaxed flex items-start gap-1">
+                        <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> {settingsNotice}
                       </p>
                     )}
                   </div>

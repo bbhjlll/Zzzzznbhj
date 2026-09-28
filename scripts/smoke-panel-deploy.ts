@@ -30,6 +30,7 @@ import {
   autoUpdatePanels,
 } from '../worker/panel-deploy'
 import { verifyRailwayToken, RailwayApiError } from '../worker/railway'
+import { resolveRailwayRegion } from '../shared/panels'
 
 // ── fetch mocking ────────────────────────────────────────────────────────────
 const calls: Array<{ url: string; method: string; body?: string; headers?: Record<string, string> }> = []
@@ -270,7 +271,9 @@ async function main() {
     { project: { environments: { edges: [{ node: { id: 'env1', name: 'production' } }] } } }, // envs
     { serviceCreate: { id: 'svc1' } },                              // serviceCreate
     { serviceInstanceAutoDeployUpdate: { enabled: false } },         // pause source deploys
-    {},                                                             // instanceUpdate
+    {},                                                             // healthcheck/startCommand
+    {},                                                             // region update
+    { serviceInstance: { region: 'europe-west4-drams3a' } },        // region read-back
     { serviceDomainCreate: { domain: 'my-app.up.railway.app' } },   // domain
     { volumeCreate: { id: 'vol1' } },                               // data volume
     { projectTokenCreate: 'project-token-1' },                      // project-scoped token
@@ -300,13 +303,33 @@ async function main() {
     )
     check('latest commit persisted', row?.['commit_sha'] === 'abc123def456' && row?.['current_deployment_id'] === 'dep1')
     check('activity logged', env.tables.activity_logs.size === 1)
-    // Netherlands (Amsterdam) is the required default region.
-    check('default region is the Netherlands', row?.['region'] === 'europe-west4', String(row?.['region']))
+    // Netherlands (Amsterdam) is the required default region, stored as the
+    // identifier Railway accepts (a short code would be silently ignored and the
+    // service would land in the account's preferred region — America).
+    check('default region is the Netherlands', row?.['region'] === 'europe-west4-drams3a', String(row?.['region']))
+    check('the confirmed region is reported back', r.region === 'europe-west4-drams3a', String(r.region))
   }
-  const regionCall = calls.find((c) => (c.body ?? '').includes('serviceInstanceUpdate'))
+  const regionCall = calls.find((c) => (c.body ?? '').includes('"region":"europe-west4-drams3a"'))
   check(
     'railway service is pinned to the Netherlands region',
-    (regionCall?.body ?? '').includes('europe-west4'),
+    !!regionCall,
+    regionCall?.body?.slice(0, 160),
+  )
+  check(
+    'the region Railway reports is read back after the change',
+    calls.some((c) => (c.body ?? '').includes(') { region }')),
+  )
+  // The region must be set *before* the volume is created: a Railway volume
+  // follows the region of its service, so the reverse order would pin the data
+  // volume to the wrong continent.
+  const regionIndex = calls.findIndex((c) => (c.body ?? '').includes('"region":"europe-west4-drams3a"'))
+  const volumeIndex = calls.findIndex((c) => (c.body ?? '').includes('volumeCreate'))
+  check('region is applied before the volume is attached', regionIndex > -1 && volumeIndex > -1 && regionIndex < volumeIndex)
+  // Region and serverless are separate mutations: one unknown field would fail
+  // the whole call, which is how a region change used to vanish.
+  check(
+    'the region mutation carries only the region',
+    !(regionCall?.body ?? '').includes('sleepApplication'),
     regionCall?.body?.slice(0, 160),
   )
 
@@ -571,7 +594,9 @@ async function main() {
     { project: { environments: { edges: [{ node: { id: ids.env, name: 'production' } }] } } },
     { serviceCreate: { id: ids.svc } },
     { serviceInstanceAutoDeployUpdate: { enabled: false } },
-    {},
+    {},                                                             // healthcheck/startCommand
+    {},                                                             // region update
+    { serviceInstance: { region: 'europe-west4-drams3a' } },        // region read-back
     { serviceDomainCreate: { domain: 'rate.up.railway.app' } },
     { volumeCreate: { id: 'vol1' } },
     { projectTokenCreate: 'project-token-9' },
@@ -612,8 +637,16 @@ async function main() {
     panel: panel.id, name: 'settings-app', region: 'europe-west4', setup_done: 1, created_at: '2026-05-05T00:00:00.000Z',
   })
   calls.length = 0
-  // region+serverless (one serviceInstanceUpdate), IPv6 (environmentPatchCommit), CDN (enableServiceCdn)
-  gqlQueue = [{}, {}, {}]
+  // region update + read-back + redeploy, then serverless (separate mutation),
+  // then IPv6 (environmentPatchCommit) and CDN (enableServiceCdn).
+  gqlQueue = [
+    {},                                                             // region update
+    { serviceInstance: { region: 'us-west2' } },                    // region read-back
+    { serviceInstanceDeployV2: 'set1-move' },                       // redeploy that moves it
+    {},                                                             // serverless
+    {},                                                             // environmentPatchCommit (IPv6)
+    { enableServiceCdn: { id: 'cdn1', enabled: true } },            // CDN
+  ]
   const applied = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', {
     region: 'us-west2',
     sleepApplication: true,
@@ -622,12 +655,18 @@ async function main() {
   })
   check('settings applied', applied.ok === true, JSON.stringify(applied))
   const setRow = env.tables.railway_deploys.get('set1')
-  check('region persisted', setRow?.['region'] === 'us-west2', String(setRow?.['region']))
+  check('region persisted', applied.ok === true && applied.region === 'us-west2' && setRow?.['region'] === 'us-west2', String(setRow?.['region']))
   check('serverless persisted', setRow?.['sleep_application'] === 1, String(setRow?.['sleep_application']))
   check('IPv6 persisted', setRow?.['ipv6_egress'] === 1, String(setRow?.['ipv6_egress']))
   check('CDN persisted', setRow?.['cdn_enabled'] === 1, String(setRow?.['cdn_enabled']))
-  const instanceBody = calls.map((c) => c.body ?? '').find((b) => b.includes('serviceInstanceUpdate')) ?? ''
-  check('region + serverless sent to serviceInstanceUpdate', instanceBody.includes('"region":"us-west2"') && instanceBody.includes('"sleepApplication":true'), instanceBody.slice(0, 200))
+  const instanceBodies = calls.map((c) => c.body ?? '').filter((b) => b.includes('serviceInstanceUpdate'))
+  check('region sent to serviceInstanceUpdate', instanceBodies.some((b) => b.includes('"region":"us-west2"')), instanceBodies.join(' | ').slice(0, 220))
+  // Serverless is its own mutation: an unknown flag must not take the region
+  // down with it (that is exactly what "settings do nothing on Railway" was).
+  check('serverless sent in a separate mutation', instanceBodies.some((b) => b.includes('"sleepApplication":true') && !b.includes('"region"')), instanceBodies.join(' | ').slice(0, 220))
+  check('region change starts a redeploy so it actually takes effect', applied.ok === true && applied.redeployId === 'set1-move')
+  check('the record follows the redeploy', setRow?.['current_deployment_id'] === 'set1-move', String(setRow?.['current_deployment_id']))
+  check('an older short region code is translated, not rejected', resolveRailwayRegion('europe-west4') === 'europe-west4-drams3a' && resolveRailwayRegion('us-east4') === 'us-east4-eqdc4a')
   const ipv6Body = calls.map((c) => c.body ?? '').find((b) => b.includes('environmentPatchCommit')) ?? ''
   check('IPv6 committed as an environment patch', ipv6Body.includes('ipv6EgressEnabled') && ipv6Body.includes('svcS'), ipv6Body.slice(0, 220))
   check('CDN enabled through enableServiceCdn', calls.some((c) => (c.body ?? '').includes('enableServiceCdn')))
@@ -637,6 +676,39 @@ async function main() {
   const cdnOff = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { cdnEnabled: false })
   check('CDN disabled through disableServiceCdn', cdnOff.ok === true && calls.some((c) => (c.body ?? '').includes('disableServiceCdn')), JSON.stringify(cdnOff))
   check('CDN flag persisted off', env.tables.railway_deploys.get('set1')?.['cdn_enabled'] === 0)
+
+  console.log('18) a region Railway refuses is a loud failure, not a silent fallback')
+  // Railway answers HTTP 200 and reports a different region: the exact shape of
+  // "asked for the Netherlands, deployed to America". It must never be recorded
+  // as if the requested region had been applied.
+  githubQueue = [{ sha: 'regionsha', html_url: 'https://github.com/miladjahani/Mizetusi/commit/regionsha' }]
+  gqlQueue = [
+    ...railwayPreamble({ prj: 'prjM', env: 'envM', svc: 'svcM' }).slice(0, 6),
+    {},                                                      // region update
+    { serviceInstance: { region: 'us-west2' } },             // Railway kept the old region
+    { serviceInstanceDeployV2: 'never' },
+  ]
+  const wrongRegion = await startPanelDeploy(env as never, { userId: 'u1', tokenId: 'rt1', name: 'wrong-region', panel })
+  check('a refused region fails the deploy', wrongRegion.ok === false, JSON.stringify(wrongRegion).slice(0, 200))
+  check(
+    'the error names both regions',
+    !wrongRegion.ok && wrongRegion.error.includes('europe-west4-drams3a') && wrongRegion.error.includes('us-west2'),
+    wrongRegion.ok ? '' : wrongRegion.error,
+  )
+  check('no deploy row is written for a refused region', !env.tables.railway_deploys.has('never'))
+
+  // The same rule for a settings change on an existing service.
+  gqlQueue = [{}, { serviceInstance: { region: 'europe-west4-drams3a' } }]
+  const refusedMove = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { region: 'asia-southeast1' })
+  check('a settings region change Railway ignores is refused', refusedMove.ok === false, JSON.stringify(refusedMove))
+  check('the refused region is not stored', env.tables.railway_deploys.get('set1')?.['region'] === 'us-west2', String(env.tables.railway_deploys.get('set1')?.['region']))
+
+  // A region change whose redeploy is refused still records the region, with a
+  // warning instead of a fake success.
+  gqlQueue = [{}, { serviceInstance: { region: 'asia-southeast1-eqsg3a' } }, { __errors: [{ message: 'Not Authorized' }] }, { __errors: [{ message: 'Not Authorized' }] }]
+  const warnOnly = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { region: 'asia-southeast1' })
+  check('a failed redeploy is a warning, not a lost setting', warnOnly.ok === true && !!warnOnly.warning, JSON.stringify(warnOnly))
+  check('the applied region is still recorded', env.tables.railway_deploys.get('set1')?.['region'] === 'asia-southeast1-eqsg3a', String(env.tables.railway_deploys.get('set1')?.['region']))
 
   const badRegion = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { region: 'mars-1' })
   check('unknown region refused before hitting Railway', badRegion.ok === false, JSON.stringify(badRegion))

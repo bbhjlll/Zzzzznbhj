@@ -1,6 +1,6 @@
 import type { Env } from './env'
 import { genId, nowIso, safeJsonParse } from './util'
-import { PANELS, panelsForTarget, panelOriginLabel, panelVerifiedLabel, RAILWAY_REGIONS, railwayRegionLabel, resolvePanel } from '../shared/panels'
+import { PANELS, panelsForTarget, panelOriginLabel, panelVerifiedLabel, RAILWAY_REGIONS, railwayRegionLabel, resolvePanel, resolveRailwayRegion } from '../shared/panels'
 import { autoWorkerSources } from '../shared/worker-sources'
 import { startDeployment } from './deploy'
 import {
@@ -406,9 +406,10 @@ export async function serversScreen(ctx: ScreenCtx, page: number): Promise<Scree
  *
  * Every button applies its change immediately (see the `srvset` handler) and
  * this screen re-renders from the record the engine just updated, so it can
- * never show a setting the platform refused.
+ * never show a setting the platform refused. `notice` carries the outcome of
+ * the change that was just made (including a non-fatal caveat).
  */
-async function serverSettingsScreen(env: Env, userId: string, deployId: string): Promise<Screen> {
+async function serverSettingsScreen(env: Env, userId: string, deployId: string, notice?: string): Promise<Screen> {
   const row = await env.DB.prepare(
     'SELECT id, name, panel, region, sleep_application, ipv6_egress, cdn_enabled FROM railway_deploys WHERE id = ? AND user_id = ?',
   )
@@ -433,6 +434,7 @@ async function serverSettingsScreen(env: Env, userId: string, deployId: string):
 
   const text =
     '⚙️ <b>تنظیمات سرویس</b>\n\n' +
+    (notice ? `${notice}\n\n` : '') +
     `🧩 ${panel.name}\n` +
     `📦 <code>${row.name ?? deployId}</code>\n\n` +
     `📍 منطقه: <b>${railwayRegionLabel(row.region)}</b>\n` +
@@ -441,8 +443,11 @@ async function serverSettingsScreen(env: Env, userId: string, deployId: string):
     `⚡️ CDN Caching: ${state(row.cdn_enabled)}\n\n` +
     'برای تغییر، گزینه‌ها را بزنید.\n<i>تغییر منطقه روی پنل‌هایی که Volume دارند کمی طول می‌کشد.</i>'
 
+  // Compare canonically: a record written before Railway renamed its regions
+  // still holds the short code and must still show as the selected one.
+  const currentRegion = resolveRailwayRegion(row.region) ?? row.region
   const regionButtons: TgButton[] = RAILWAY_REGIONS.map((r) => ({
-    text: `${r.id === row.region ? '✅ ' : ''}📍 ${r.label}`,
+    text: `${r.id === currentRegion ? '✅ ' : ''}📍 ${r.label}`,
     callback_data: `srvset:g:${deployId}:${r.id}`,
   }))
   const rows: TgButton[][] = []
@@ -801,6 +806,19 @@ export async function routeCallback(args: RouterArgs): Promise<Screen | null> {
           text: `❌ <b>تغییر تنظیمات ناموفق بود</b>\n\n⚠️ ${applied.error}`,
           keyboard: { inline_keyboard: [[{ text: '🔙 تنظیمات', callback_data: `srvset:o:${deployId}` }], [homeButton()]] },
         }
+      }
+      // Tell the truth about what Railway confirmed: a region change that was
+      // applied also started the deployment that moves the container, and a
+      // caveat (applied but not yet in effect) is never hidden.
+      if (applied.warning) return serverSettingsScreen(env, args.userId, deployId, `⚠️ ${applied.warning}`)
+      if (action === 'g' && applied.region) {
+        return serverSettingsScreen(
+          env,
+          args.userId,
+          deployId,
+          `✅ منطقه روی <b>${railwayRegionLabel(applied.region)}</b> ثبت شد` +
+            (applied.redeployId ? ' و استقرار تازه برای اعمال آن شروع شد.' : '.'),
+        )
       }
     }
     return serverSettingsScreen(env, args.userId, deployId)

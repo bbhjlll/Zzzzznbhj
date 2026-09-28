@@ -53,7 +53,9 @@ const SCHEMA_STATEMENTS = [
     service_id TEXT NOT NULL,
     environment_id TEXT NOT NULL,
     current_deployment_id TEXT,
-    region TEXT NOT NULL DEFAULT 'europe-west4',
+    -- Canonical Railway region identifier (EU West / Amsterdam). An older short
+    -- code here would silently deploy in the account's preferred region.
+    region TEXT NOT NULL DEFAULT 'europe-west4-drams3a',
     domain TEXT,
     branch TEXT NOT NULL DEFAULT 'main',
     commit_sha TEXT,

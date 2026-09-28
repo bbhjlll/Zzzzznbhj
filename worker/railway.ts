@@ -10,7 +10,16 @@
  *   → env vars + start command → serviceInstanceDeployV2 → poll until SUCCESS
  */
 
-import { buildPanelDeployEnv, DEFAULT_RAILWAY_REGION, panelBranch, panelDataDir, panelDataFile, panelTcpPorts, type PanelSpec } from '../shared/panels'
+import {
+  buildPanelDeployEnv,
+  DEFAULT_RAILWAY_REGION,
+  panelBranch,
+  panelDataDir,
+  panelDataFile,
+  panelTcpPorts,
+  resolveRailwayRegion,
+  type PanelSpec,
+} from '../shared/panels'
 
 export class RailwayApiError extends Error {
   /**
@@ -191,6 +200,12 @@ export interface RailwayDeployResult {
   serviceId: string
   environmentId: string
   deploymentId: string
+  /**
+   * The region Railway actually has configured on the service after the deploy
+   * request — the canonical identifier, read back from Railway, never just the
+   * value we asked for.
+   */
+  region: string
   /** Pinned upstream sha; null when GitHub could not be reached and Railway
    *  deployed the connected branch HEAD instead. */
   commitSha: string | null
@@ -269,6 +284,75 @@ async function triggerRailwayDeploy(
   const deploymentId = data.serviceInstanceDeployV2 as string | undefined
   if (!deploymentId) throw new RailwayApiError('دستور استقرار آخرین نسخه روی Railway اجرا نشد')
   return deploymentId
+}
+
+/**
+ * Read the region a service instance is configured with, straight from Railway.
+ *
+ * Best-effort by design: this is a *verification* step, and an API surface that
+ * cannot answer it must not fail an otherwise valid deployment. `null` means
+ * "could not be determined", which callers treat differently from a mismatch.
+ */
+async function readRailwayServiceRegion(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+): Promise<string | null> {
+  try {
+    const data = await gql(
+      token,
+      'query ($serviceId: String!, $environmentId: String!) { serviceInstance(serviceId: $serviceId, environmentId: $environmentId) { region } }',
+      { serviceId, environmentId },
+    )
+    const inst = data.serviceInstance as { region?: string | null } | undefined
+    return inst?.region ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Point a service instance at a region and **prove Railway accepted it**.
+ *
+ * This is deliberately not best-effort. Railway rejects an unknown region
+ * identifier inside `serviceInstanceUpdate` while still answering HTTP 200 with
+ * an `errors` array, and a service whose region change was refused simply keeps
+ * running in the workspace's preferred region (America for most accounts).
+ * Swallowing that error is what made a deploy "set to the Netherlands" land in
+ * America, so a refusal — or a read-back that shows a *different* region than
+ * the one requested — now surfaces as a clear error instead.
+ *
+ * A region Railway reports in its short form (`europe-west4` for
+ * `europe-west4-drams3a`) is normalised before comparing, so the two spellings
+ * of the same region never look like a mismatch.
+ */
+async function applyRailwayRegion(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+  region: string,
+): Promise<string> {
+  const wanted = resolveRailwayRegion(region)
+  if (!wanted) {
+    throw new RailwayApiError(
+      `منطقهٔ «${region}» را Railway پشتیبانی نمی‌کند — یکی از منطقه‌های فهرست (هلند/آمریکا/سنگاپور) را انتخاب کنید`,
+    )
+  }
+  await gql(
+    token,
+    'mutation ($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }',
+    { serviceId, environmentId, input: { region: wanted } },
+  )
+  const observed = await readRailwayServiceRegion(token, serviceId, environmentId)
+  if (observed) {
+    const observedCanonical = resolveRailwayRegion(observed) ?? observed
+    if (observedCanonical !== wanted) {
+      throw new RailwayApiError(
+        `Railway منطقهٔ درخواستی (${wanted}) را اعمال نکرد و سرویس روی ${observed} ماند — دوباره تلاش کنید یا منطقه را از داشبورد Railway عوض کنید`,
+      )
+    }
+  }
+  return wanted
 }
 
 /**
@@ -386,19 +470,28 @@ export async function deployToRailway(
     { input: { projectId, serviceId, environmentId, enabled: false } },
   ).catch(() => null)
 
-  // 3b. Pin the deployment region (and, for non-Docker panels, the build/start
-  //     commands Nixpacks needs) before the first deploy.
-  const instanceInput: Record<string, unknown> = { region }
+  // 3b. Health check path (and, for non-Docker panels, the build/start commands
+  //     Nixpacks needs) before the first deploy.
+  const instanceInput: Record<string, unknown> = {}
   if (panel.healthPath || panel.panelPath) instanceInput.healthcheckPath = panel.healthPath ?? panel.panelPath
   if (panel.runtime !== 'docker') {
     if (panel.startCommand) instanceInput.startCommand = panel.startCommand
     if (panel.buildCommand) instanceInput.buildCommand = panel.buildCommand
   }
-  await gql(
-    token,
-    'mutation ($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }',
-    { serviceId, environmentId, input: instanceInput },
-  ).catch(() => null)
+  if (Object.keys(instanceInput).length) {
+    await gql(
+      token,
+      'mutation ($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }',
+      { serviceId, environmentId, input: instanceInput },
+    ).catch(() => null)
+  }
+
+  // 3b-2. Pin the deployment region — *before* the volume below, because a
+  //       Railway volume follows the region of its service. Unlike the settings
+  //       above this one is not best-effort: a region Railway refuses means the
+  //       panel would silently run in the workspace's default region (America),
+  //       so the mismatch is surfaced instead of ignored.
+  const appliedRegion = await applyRailwayRegion(token, serviceId, environmentId, region)
 
   // 3c. Generate a *.up.railway.app domain so the panel is reachable as soon
   //     as the first deploy goes live.
@@ -528,6 +621,7 @@ export async function deployToRailway(
     serviceId,
     environmentId,
     deploymentId,
+    region: appliedRegion,
     commitSha: latest.sha,
     commitUrl: latest.url,
     projectToken,
@@ -645,31 +739,62 @@ export async function readRailwayServiceSettings(
   }
 }
 
+/** What actually happened to a settings change, so the UI can tell the truth. */
+export interface RailwaySettingsResult {
+  /** Region Railway reports on the service after the change (null when unverifiable). */
+  region: string | null
+  /**
+   * Deployment started to make a region change take effect. A region change only
+   * moves the running container on the *next* deployment, so without this the
+   * panel keeps serving from the old region while the settings card says it
+   * moved.
+   */
+  redeployId: string | null
+  /** A non-fatal problem worth showing (applied, but not in effect yet). */
+  warning: string | null
+}
+
 /**
  * Apply a settings change on an existing Railway service.
  *
- *  • `region` / `sleepApplication` → `serviceInstanceUpdate` (public API).
+ *  • `region` → `serviceInstanceUpdate` (+ a redeploy, so it takes effect).
+ *  • `sleepApplication` → its own `serviceInstanceUpdate`.
  *  • `ipv6Egress` → `environmentPatchCommit`: Railway models outbound IPv6 as an
  *    environment config change, and committing that patch also triggers the
  *    redeploy the toggle needs.
  *  • `cdnEnabled` → `enableServiceCdn` / `disableServiceCdn` (needs an applied
  *    public domain, which a deployed panel always has).
  *
+ * Region and serverless are sent as **separate** mutations on purpose. Railway
+ * fails the whole `serviceInstanceUpdate` for a single unknown field, and its
+ * serverless flag (`sleepApplication`) is newer than `region` — bundled into one
+ * call, one refused flag would silently drop the region change with it, which is
+ * a large part of why "the settings in miliconfig do nothing on Railway".
+ *
  * Each step is independent: a refusal on one setting does not discard the
- * others, and the first error is surfaced to the caller.
+ * others, and the first hard error is surfaced to the caller.
  */
 export async function updateRailwayServiceSettings(
   token: string,
   opts: { serviceId: string; environmentId: string } & RailwaySettingsPatch,
-): Promise<void> {
-  const instanceInput: Record<string, unknown> = {}
-  if (opts.region) instanceInput.region = opts.region
-  if (typeof opts.sleepApplication === 'boolean') instanceInput.sleepApplication = opts.sleepApplication
-  if (Object.keys(instanceInput).length) {
+): Promise<RailwaySettingsResult> {
+  const result: RailwaySettingsResult = { region: null, redeployId: null, warning: null }
+
+  if (opts.region) {
+    result.region = await applyRailwayRegion(token, opts.serviceId, opts.environmentId, opts.region)
+    try {
+      result.redeployId = await railwayRedeploy(token, opts.serviceId, opts.environmentId)
+    } catch (err) {
+      const reason = err instanceof RailwayApiError ? err.message : 'دستور راه‌اندازی مجدد پذیرفته نشد'
+      result.warning = `منطقه روی ${result.region} ثبت شد اما برای اعمال آن یک راه‌اندازی مجدد لازم است و ناموفق بود (${reason}) — از دکمهٔ «بروزرسانی به آخرین نسخه» استفاده کنید`
+    }
+  }
+
+  if (typeof opts.sleepApplication === 'boolean') {
     await gql(
       token,
       'mutation ($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }',
-      { serviceId: opts.serviceId, environmentId: opts.environmentId, input: instanceInput },
+      { serviceId: opts.serviceId, environmentId: opts.environmentId, input: { sleepApplication: opts.sleepApplication } },
     )
   }
 
@@ -700,4 +825,6 @@ export async function updateRailwayServiceSettings(
       )
     }
   }
+
+  return result
 }

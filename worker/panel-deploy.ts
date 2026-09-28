@@ -9,7 +9,7 @@
 
 import type { Env } from './env'
 import { genId, nowIso } from './util'
-import { DEFAULT_RAILWAY_REGION, isRailwayRegion, panelBranch, resolvePanel, type PanelCapability, type PanelSpec } from '../shared/panels'
+import { DEFAULT_RAILWAY_REGION, panelBranch, resolvePanel, resolveRailwayRegion, type PanelCapability, type PanelSpec } from '../shared/panels'
 import { deployToRailway, RailwayApiError, railwayDeployStatus, railwayRedeploy, updateRailwayPanel, updateRailwayServiceSettings } from './railway'
 import { deployToRender, RenderApiError, renderDeployStatus, renderRedeploy } from './render'
 import { notifyDeployment } from './telegram-core'
@@ -43,6 +43,8 @@ export type StartPanelDeployResult =
       /** Railway may already return the generated *.up.railway.app domain. */
       domain: string | null
       dashboardUrl: string
+      /** Region Railway confirmed for the service (Railway deploys only). */
+      region?: string
     }
   | { ok: false; error: string }
 
@@ -86,9 +88,10 @@ export async function startPanelDeploy(env: Env, input: StartPanelDeployInput): 
 
   try {
     if (platform === 'railway') {
-      // Netherlands (Amsterdam) is the required default; anything malformed falls
-      // back to it rather than a US region.
-      const region = /^[a-z0-9-]+$/.test(input.region ?? '') ? (input.region as string) : DEFAULT_RAILWAY_REGION
+      // Netherlands (Amsterdam) is the required default; anything malformed — or
+      // an older short region code — is resolved to the identifier Railway
+      // accepts today rather than falling back to a US region.
+      const region = resolveRailwayRegion(input.region) ?? DEFAULT_RAILWAY_REGION
       const result = await deployToRailway(token, name, region, input.panel, { adminPassword, secretKey })
       await env.DB.prepare(
         `INSERT INTO railway_deploys (
@@ -105,7 +108,9 @@ export async function startPanelDeploy(env: Env, input: StartPanelDeployInput): 
         result.serviceId,
         result.environmentId,
         result.deploymentId,
-        region,
+        // The region Railway *confirmed*, not the one we asked for: if the two
+        // ever differ the deploy above has already failed loudly.
+        result.region,
         result.domain ?? null,
         'main',
         result.commitSha,
@@ -126,7 +131,17 @@ export async function startPanelDeploy(env: Env, input: StartPanelDeployInput): 
       ).run()
       await env.DB.prepare('UPDATE railway_tokens SET last_used_at = ? WHERE id = ?').bind(nowIso(), tokenId).run()
       await logStarted(env, input.userId, 'railway', name)
-      return { ok: true, platform, id: result.deploymentId, projectId: result.projectId, adminUsername, adminPassword, domain: result.domain ?? null, dashboardUrl: result.projectUrl }
+      return {
+        ok: true,
+        platform,
+        id: result.deploymentId,
+        projectId: result.projectId,
+        adminUsername,
+        adminPassword,
+        domain: result.domain ?? null,
+        dashboardUrl: result.projectUrl,
+        region: result.region,
+      }
     }
 
     const result = await deployToRender(token, name, input.panel, { adminPassword, secretKey })
@@ -737,14 +752,29 @@ interface RailwaySettingsRecord {
   environment_id: string | null
 }
 
+export interface PanelSettingsResult {
+  ok: true
+  /** Region Railway reports on the service after the change (null when unknown). */
+  region: string | null
+  /** Deployment started because the region only moves on a new deployment. */
+  redeployId: string | null
+  /** Non-fatal problem (applied, but not in effect yet). */
+  warning: string | null
+}
+
 /**
  * Change a running deployment's platform settings.
  *
  * The owner picks the region, serverless, outbound IPv6 and CDN caching after
  * deployment (the same knobs the Railway dashboard exposes). Railway is applied
  * first and our record only updated once it succeeds, so a card can never show a
- * setting the platform refused. Render deployments are refused: Render owns
- * those toggles in its own dashboard.
+ * setting the platform refused — and the region we store is the one Railway
+ * reports back, not the one we asked for. A region change also starts the
+ * deployment that actually moves the container (and becomes the deployment the
+ * status watch follows), instead of leaving the panel in the old region.
+ *
+ * Render deployments are refused: Render owns those toggles in its own
+ * dashboard.
  */
 export async function updatePanelSettings(
   env: Env,
@@ -752,7 +782,7 @@ export async function updatePanelSettings(
   platform: PanelPlatform,
   id: string,
   patch: PanelSettingsPatch,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<PanelSettingsResult | { ok: false; error: string }> {
   const rec = platform === 'railway'
     ? await env.DB.prepare(
         'SELECT name, panel, token_id, service_id, environment_id FROM railway_deploys WHERE id = ? AND user_id = ?',
@@ -765,18 +795,22 @@ export async function updatePanelSettings(
   }
   const rail = rec as RailwaySettingsRecord
   if (!rail.environment_id) return { ok: false, error: 'اطلاعات محیط این استقرار کامل نیست — یک استقرار تازه بسازید' }
-  if (patch.region !== undefined && !isRailwayRegion(patch.region)) {
+  // Translate an older short code to the identifier Railway accepts, and refuse
+  // anything that is not a region at all before it ever reaches the API.
+  const wantedRegion = patch.region !== undefined ? resolveRailwayRegion(patch.region) : null
+  if (patch.region !== undefined && !wantedRegion) {
     return { ok: false, error: 'منطقهٔ انتخابی معتبر نیست' }
   }
 
   const token = await activeToken(env, userId, rail.token_id, platform)
   if (!token) return { ok: false, error: 'توکن فعال این استقرار پیدا نشد — ابتدا یک توکن تازه اضافه کنید' }
 
+  let applied: Awaited<ReturnType<typeof updateRailwayServiceSettings>>
   try {
-    await updateRailwayServiceSettings(token, {
+    applied = await updateRailwayServiceSettings(token, {
       serviceId: rail.service_id,
       environmentId: rail.environment_id,
-      ...(patch.region !== undefined ? { region: patch.region } : {}),
+      ...(wantedRegion ? { region: wantedRegion } : {}),
       ...(typeof patch.sleepApplication === 'boolean' ? { sleepApplication: patch.sleepApplication } : {}),
       ...(typeof patch.ipv6Egress === 'boolean' ? { ipv6Egress: patch.ipv6Egress } : {}),
       ...(typeof patch.cdnEnabled === 'boolean' ? { cdnEnabled: patch.cdnEnabled } : {}),
@@ -793,10 +827,19 @@ export async function updatePanelSettings(
 
   const sets: string[] = []
   const binds: Array<string | number> = []
-  if (patch.region !== undefined) { sets.push('region = ?'); binds.push(patch.region) }
+  if (wantedRegion) {
+    sets.push('region = ?')
+    binds.push(applied.region ?? wantedRegion)
+  }
   if (typeof patch.sleepApplication === 'boolean') { sets.push('sleep_application = ?'); binds.push(patch.sleepApplication ? 1 : 0) }
   if (typeof patch.ipv6Egress === 'boolean') { sets.push('ipv6_egress = ?'); binds.push(patch.ipv6Egress ? 1 : 0) }
   if (typeof patch.cdnEnabled === 'boolean') { sets.push('cdn_enabled = ?'); binds.push(patch.cdnEnabled ? 1 : 0) }
+  // The region change started a fresh deployment; point the record at it so the
+  // next status poll follows the build that is actually moving the panel.
+  if (applied.redeployId) {
+    sets.push('current_deployment_id = ?')
+    binds.push(applied.redeployId)
+  }
   if (sets.length) {
     binds.push(id, userId)
     await env.DB.prepare(`UPDATE railway_deploys SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`).bind(...binds).run()
@@ -804,7 +847,7 @@ export async function updatePanelSettings(
   await env.DB.prepare('INSERT INTO activity_logs (id, user_id, action, entity_type, entity_name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
     .bind(genId(), userId, 'panel_settings_changed', 'deployment', rail.name ?? resolvePanel(rail.panel).name, nowIso())
     .run()
-  return { ok: true }
+  return { ok: true, region: applied.region ?? wantedRegion ?? null, redeployId: applied.redeployId, warning: applied.warning }
 }
 
 export interface PanelAutoUpdateSummary {

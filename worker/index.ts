@@ -30,7 +30,7 @@ import { handleMemberCreate, handleMemberCreateMany, handleMemberList, handleMem
 import { serveStatusPage } from './status'
 import { exportBackup, importBackup } from './backup'
 import { handleSourceSettings, handleSourceNodes } from './sourcebridge'
-import { panelTcpPorts, resolvePanel } from '../shared/panels'
+import { DEFAULT_RAILWAY_REGION, panelTcpPorts, railwayRegionLabel, resolvePanel } from '../shared/panels'
 
 interface DeploymentBody {
   name?: string
@@ -158,6 +158,10 @@ async function handleRailwayDeploy(env: Env, userId: string, request: Request): 
       panel_path: panel.panelPath,
       admin_username: started.adminUsername,
       admin_password: started.adminPassword,
+      // The region Railway confirmed — the wizard shows this instead of assuming
+      // the requested one was accepted.
+      region: started.region ?? DEFAULT_RAILWAY_REGION,
+      region_label: railwayRegionLabel(started.region ?? DEFAULT_RAILWAY_REGION),
     },
   })
 }
@@ -270,7 +274,17 @@ async function handlePanelSettings(env: Env, userId: string, request: Request): 
   if (!Object.keys(patch).length) return apiError('تنظیمی برای تغییر ارسال نشده')
   const result = await updatePanelSettings(env, userId, platform, body.id, patch)
   if (!result.ok) return apiError(result.error, 400)
-  return json({ data: { deploys: await listPanelDeploys(env, userId) } })
+  return json({
+    data: {
+      deploys: await listPanelDeploys(env, userId),
+      // What Railway actually reports now, plus any non-fatal caveat (a region
+      // that was recorded but could not be taken live yet).
+      region: result.region,
+      region_label: railwayRegionLabel(result.region),
+      redeployId: result.redeployId,
+      warning: result.warning,
+    },
+  })
 }
 
 /** Opt one hosted panel into (or out of) the scheduled latest-version sweep. */

@@ -343,16 +343,24 @@ export function panelBranch(panel: PanelSpec): string {
 /**
  * Railway region every panel deploys to unless the caller asks otherwise.
  *
- * `europe-west4` is Railway's **Amsterdam / Netherlands** region, which is what
- * the owner requires for panels (better latency for the Middle East audience).
- * It is the single default used by the bot, the web wizard and the API, so no
- * deploy path can silently fall back to the US.
+ * `europe-west4-drams3a` is Railway's **EU West (Metal) — Amsterdam, the
+ * Netherlands** region and the exact identifier from Railway's own region table
+ * (docs.railway.com/deployments/regions). The single default used by the bot,
+ * the web wizard and the API, so no deploy path can silently fall back to the
+ * US.
+ *
+ * It *must* be the identifier, not the older short code (`europe-west4`). The
+ * live API no longer accepts the short codes in
+ * `serviceInstanceUpdate.input.region`: the mutation is rejected and the service
+ * quietly stays in the workspace's own preferred region — which for most
+ * accounts is the US, so a deploy that asked for the Netherlands landed in
+ * America while the UI reported the Netherlands.
  */
-export const DEFAULT_RAILWAY_REGION = 'europe-west4'
+export const DEFAULT_RAILWAY_REGION = 'europe-west4-drams3a'
 
 /** One selectable Railway deployment region. */
 export interface RailwayRegion {
-  /** Region code accepted by `serviceInstanceUpdate.input.region`. */
+  /** Region identifier accepted by `serviceInstanceUpdate.input.region`. */
   id: string
   /** Persian label shown in the pickers. */
   label: string
@@ -361,45 +369,76 @@ export interface RailwayRegion {
 }
 
 /**
- * Every region Railway offers today.
+ * Every region Railway offers today, with the identifiers Railway itself
+ * documents (`docs.railway.com/deployments/regions`).
  *
- * Sourced from Railway's public "Regions" reference (US West, US East, EU West
- * and Southeast Asia). The owner wants Netherlands by default and the rest
- * selectable per deployment, so this list is the one place both the bot and the
- * web app read the choices from.
+ * The owner wants the Netherlands by default and the rest selectable per
+ * deployment, so this list is the one place both the bot and the web app read
+ * the choices from.
  */
 export const RAILWAY_REGIONS: RailwayRegion[] = [
-  { id: 'europe-west4', label: 'هلند (آمستردام)', area: 'اروپای غربی' },
+  { id: 'europe-west4-drams3a', label: 'هلند (آمستردام)', area: 'اروپای غربی' },
   { id: 'us-west2', label: 'آمریکا (کالیفرنیا)', area: 'غرب آمریکا' },
-  { id: 'us-east4', label: 'آمریکا (ویرجینیا)', area: 'شرق آمریکا' },
-  { id: 'asia-southeast1', label: 'سنگاپور', area: 'جنوب‌شرق آسیا' },
+  { id: 'us-east4-eqdc4a', label: 'آمریکا (ویرجینیا)', area: 'شرق آمریکا' },
+  { id: 'asia-southeast1-eqsg3a', label: 'سنگاپور', area: 'جنوب‌شرق آسیا' },
 ]
 
 /**
- * Labels for the region codes Railway may return or store — including the
- * suffixed "metal" identifiers used by multi-region config, so a record written
- * by the dashboard still renders with a friendly name.
+ * Short region codes earlier releases of this app stored and sent → the
+ * identifier Railway accepts today.
+ *
+ * Railway renamed its regions when it moved to the "metal" fleet. Records in our
+ * own database (and any caller still sending the old code) are translated here
+ * instead of being rejected, so an existing deployment card keeps working and a
+ * stale value can never silently become "America". A code that is neither a
+ * current identifier nor listed here is genuinely unsupported and is refused.
+ */
+export const RAILWAY_REGION_ALIASES: Record<string, string> = {
+  'europe-west4': 'europe-west4-drams3a',
+  'us-east4': 'us-east4-eqdc4a',
+  'asia-southeast1': 'asia-southeast1-eqsg3a',
+}
+
+/**
+ * Labels for the region codes Railway may return or store — both the current
+ * identifiers and the older short codes — so a record written by the dashboard
+ * (or by an older build of this app) still renders with a friendly name.
  */
 export const RAILWAY_REGION_LABELS: Record<string, string> = {
-  'europe-west4': 'هلند (آمستردام)',
   'europe-west4-drams3a': 'هلند (آمستردام)',
+  'europe-west4': 'هلند (آمستردام)',
   'us-west2': 'آمریکا (کالیفرنیا)',
   'us-west1': 'آمریکا (اورگان)',
-  'us-east4': 'آمریکا (ویرجینیا)',
   'us-east4-eqdc4a': 'آمریکا (ویرجینیا)',
-  'asia-southeast1': 'سنگاپور',
+  'us-east4': 'آمریکا (ویرجینیا)',
   'asia-southeast1-eqsg3a': 'سنگاپور',
+  'asia-southeast1': 'سنگاپور',
+}
+
+/**
+ * The canonical identifier Railway accepts for a region code, or null when the
+ * code is not a region we support (including the older short codes, which are
+ * translated rather than rejected).
+ *
+ * Every path that talks to Railway goes through this, so a short code from an
+ * old record or an API caller can never reach `serviceInstanceUpdate` as-is.
+ */
+export function resolveRailwayRegion(region?: string | null): string | null {
+  const code = (region ?? '').trim().toLowerCase()
+  if (!code) return null
+  if (RAILWAY_REGIONS.some((r) => r.id === code)) return code
+  return RAILWAY_REGION_ALIASES[code] ?? null
 }
 
 /** Human label for a Railway region code (falls back to the raw code). */
 export function railwayRegionLabel(region?: string | null): string {
   if (!region) return RAILWAY_REGION_LABELS[DEFAULT_RAILWAY_REGION]
-  return RAILWAY_REGION_LABELS[region] ?? region
+  return RAILWAY_REGION_LABELS[region] ?? RAILWAY_REGION_LABELS[resolveRailwayRegion(region) ?? ''] ?? region
 }
 
 /** Is this a region code we offer? (Keeps a bad request away from Railway.) */
 export function isRailwayRegion(region: string): boolean {
-  return RAILWAY_REGIONS.some((r) => r.id === region)
+  return resolveRailwayRegion(region) !== null
 }
 
 /** Generated and user-specific values used to build a deployment manifest. */
