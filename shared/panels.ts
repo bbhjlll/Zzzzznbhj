@@ -366,6 +366,20 @@ export interface RailwayRegion {
    * identifier, e.g. `europe-west4-drams3a`.
    */
   id: string
+  /**
+   * Short, stable token for payloads with a hard size limit.
+   *
+   * Telegram rejects a button whose `callback_data` is longer than **64 bytes**
+   * with `BUTTON_DATA_INVALID`, and it rejects the whole message rather than
+   * that one button — so a single oversized payload silently removes the entire
+   * keyboard. A deployment id is 36 characters, which made
+   * `srvset:g:<id>:europe-west4-drams3a` 66 bytes: the service-settings screen
+   * never rendered, and the Netherlands could not be selected at all.
+   *
+   * These are Railway's own short region ids, so they also resolve back to the
+   * same region through `RAILWAY_REGION_ALIASES`.
+   */
+  code: string
   /** Persian label shown in the pickers. */
   label: string
   /** Country/area, for the secondary line. */
@@ -381,10 +395,10 @@ export interface RailwayRegion {
  * the choices from.
  */
 export const RAILWAY_REGIONS: RailwayRegion[] = [
-  { id: 'europe-west4-drams3a', label: 'هلند (آمستردام)', area: 'اروپای غربی' },
-  { id: 'us-west2', label: 'آمریکا (کالیفرنیا)', area: 'غرب آمریکا' },
-  { id: 'us-east4-eqdc4a', label: 'آمریکا (ویرجینیا)', area: 'شرق آمریکا' },
-  { id: 'asia-southeast1-eqsg3a', label: 'سنگاپور', area: 'جنوب‌شرق آسیا' },
+  { id: 'europe-west4-drams3a', code: 'ams', label: 'هلند (آمستردام)', area: 'اروپای غربی' },
+  { id: 'us-west2', code: 'sfo', label: 'آمریکا (کالیفرنیا)', area: 'غرب آمریکا' },
+  { id: 'us-east4-eqdc4a', code: 'iad', label: 'آمریکا (ویرجینیا)', area: 'شرق آمریکا' },
+  { id: 'asia-southeast1-eqsg3a', code: 'sin', label: 'سنگاپور', area: 'جنوب‌شرق آسیا' },
 ]
 
 /**
@@ -462,6 +476,23 @@ export function resolveRailwayRegion(region?: string | null): string | null {
   if (!code) return null
   if (RAILWAY_REGIONS.some((r) => r.id === code)) return code
   return RAILWAY_REGION_ALIASES[code] ?? null
+}
+
+/**
+ * Resolve a short region `code` — or a full region `id`, or any spelling the
+ * alias table knows — back to its catalog entry.
+ *
+ * Both forms are accepted on purpose: a keyboard that is already sitting in
+ * someone's Telegram chat carries whichever form was current when it was sent,
+ * so an old payload must keep working after the payload format changes.
+ */
+export function railwayRegionFromCode(code?: string | null): RailwayRegion | null {
+  const value = (code ?? '').trim().toLowerCase()
+  if (!value) return null
+  const direct = RAILWAY_REGIONS.find((r) => r.code === value || r.id === value)
+  if (direct) return direct
+  const canonical = resolveRailwayRegion(value)
+  return canonical ? RAILWAY_REGIONS.find((r) => r.id === canonical) ?? null : null
 }
 
 /** Human label for a Railway region code (falls back to the raw code). */

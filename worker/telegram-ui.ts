@@ -1,6 +1,6 @@
 import type { Env } from './env'
 import { genId, nowIso, safeJsonParse } from './util'
-import { PANELS, panelsForTarget, panelOriginLabel, panelVerifiedLabel, RAILWAY_REGIONS, railwayRegionLabel, resolvePanel, resolveRailwayRegion } from '../shared/panels'
+import { PANELS, panelsForTarget, panelOriginLabel, panelVerifiedLabel, RAILWAY_REGIONS, railwayRegionFromCode, railwayRegionLabel, resolvePanel, resolveRailwayRegion } from '../shared/panels'
 import { autoWorkerSources } from '../shared/worker-sources'
 import { startDeployment } from './deploy'
 import {
@@ -41,6 +41,20 @@ import {
 // ══════════════════════════════════════════════════════════════════════════════
 
 const PAGE_SIZE = 6
+
+/**
+ * Telegram rejects any `callback_data` longer than 64 bytes with
+ * BUTTON_DATA_INVALID — and it rejects the whole message, so one oversized
+ * button silently removes the entire keyboard. Every payload this module builds
+ * has to stay inside the limit, which is why ids in payloads are short codes and
+ * `scripts/smoke-bot-keyboards.ts` asserts the length of every button it renders.
+ */
+export const CALLBACK_LIMIT = 64
+
+/** Byte length of a callback payload, counted the way Telegram counts it. */
+export function callbackBytes(data: string): number {
+  return new TextEncoder().encode(data).length
+}
 
 // ── Persistent reply keyboard = the app tabs ─────────────────────────────────
 
@@ -446,9 +460,13 @@ async function serverSettingsScreen(env: Env, userId: string, deployId: string, 
   // Compare canonically: a record written before Railway renamed its regions
   // still holds the short code and must still show as the selected one.
   const currentRegion = resolveRailwayRegion(row.region) ?? row.region
+  // The payload carries the region's short `code`, never its id: Telegram caps
+  // `callback_data` at 64 bytes and drops the *whole* keyboard when one button
+  // exceeds it, so `srvset:g:<36-char id>:europe-west4-drams3a` (66 bytes) meant
+  // this screen never rendered and the Netherlands was unselectable.
   const regionButtons: TgButton[] = RAILWAY_REGIONS.map((r) => ({
     text: `${r.id === currentRegion ? '✅ ' : ''}📍 ${r.label}`,
-    callback_data: `srvset:g:${deployId}:${r.id}`,
+    callback_data: `srvset:g:${deployId}:${r.code}`,
   }))
   const rows: TgButton[][] = []
   for (let i = 0; i < regionButtons.length; i += 2) rows.push(regionButtons.slice(i, i + 2))
@@ -793,7 +811,9 @@ export async function routeCallback(args: RouterArgs): Promise<Screen | null> {
         .first<{ sleep_application: number | null; ipv6_egress: number | null; cdn_enabled: number | null }>()
       if (!current) return serversScreen(ctx, 0)
       const patch: PanelSettingsPatch = {}
-      if (action === 'g') patch.region = parts[3] ?? ''
+      // A short region code from the button, or a full region id from a keyboard
+      // that was sent before the payload shrank — both resolve to one region.
+      if (action === 'g') patch.region = railwayRegionFromCode(parts[3])?.id ?? parts[3] ?? ''
       if (action === 't') {
         const field = parts[3]
         if (field === 's') patch.sleepApplication = !current.sleep_application

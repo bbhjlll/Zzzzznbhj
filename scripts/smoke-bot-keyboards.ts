@@ -8,9 +8,15 @@
  *
  * Before the fix, pressing the "📋 ورکرها" tab sent the workspace list as text
  * with only the reply keyboard attached — readable, but with no button to tap.
+ *
+ * It also pins Telegram's 64-byte `callback_data` ceiling on the service-settings
+ * screen: an oversized payload is rejected per *message*, so one long button
+ * silently removes the whole keyboard (the Netherlands region button was 66
+ * bytes, which is why the region could not be selected at all).
  */
 import { handleTelegramWebhook } from '../worker/telegram'
-import { MENU } from '../worker/telegram-ui'
+import { CALLBACK_LIMIT, MENU, callbackBytes } from '../worker/telegram-ui'
+import { RAILWAY_REGIONS, railwayRegionFromCode } from '../shared/panels'
 import type { Env } from '../worker/env'
 
 const TELEGRAM_ID = 777
@@ -43,6 +49,23 @@ const CONFIG: Row = {
   claim_code: null,
 }
 
+// A deployed panel with a *real* 36-character Railway deployment id — the exact
+// shape that made the region payload oversize Telegram's callback limit.
+const RAILWAY_ID = '3f9a1c2e-5b7d-4e8f-9a01-2b3c4d5e6f70'
+const RAILWAY_DEPLOY: Row = {
+  id: RAILWAY_ID,
+  user_id: 'u1',
+  name: 'mil-rail',
+  panel: 'mizetusi',
+  region: 'europe-west4-drams3a',
+  domain: 'mil-rail.up.railway.app',
+  admin_username: 'admin',
+  sleep_application: null,
+  ipv6_egress: null,
+  cdn_enabled: null,
+  created_at: '2026-09-20T10:00:00.000Z',
+}
+
 const DEPLOYMENTS: Row[] = [
   { id: 'dep1', name: 'mil-aaa', status: 'deployed', worker_url: 'https://a.example.com', panel_url: null, uuid: 'u-1', custom_path: 'sub', method: 'workers', worker_source: 'edgetunnel', created_at: '2026-09-13T10:00:00.000Z' },
   { id: 'dep2', name: 'mil-bbb', status: 'failed', worker_url: 'https://b.example.com', panel_url: null, uuid: 'u-2', custom_path: 'sub', method: 'workers', worker_source: 'edgetunnel', created_at: '2026-09-12T10:00:00.000Z' },
@@ -65,11 +88,13 @@ async function first(sql: string, _binds: unknown[]): Promise<unknown> {
   // "first active row" fallback), so the mock answers that lookup explicitly.
   if (sql.includes('COUNT(*)')) return { c: 1 }
   if (sql.includes('FROM bot_config')) return CONFIG
+  if (sql.includes('FROM railway_deploys')) return RAILWAY_DEPLOY
   return null
 }
 
 async function all(sql: string): Promise<{ results: unknown[] }> {
   if (sql.includes('FROM deployments')) return { results: DEPLOYMENTS }
+  if (sql.includes('FROM railway_deploys')) return { results: [RAILWAY_DEPLOY] }
   return { results: [] }
 }
 
@@ -185,6 +210,53 @@ async function main() {
     const send = calls.filter((c) => c.method === 'sendMessage').at(-1)
     check(`${tab} → دکمه‌های اینلاین دارد`, flatButtons(inlineOf(send)).length > 0)
   }
+
+  console.log('\n۵) صفحهٔ تنظیمات سرویس — هیچ دکمه‌ای از سقف ۶۴ بایتی تلگرام رد نمی‌شود')
+  // Telegram answers BUTTON_DATA_INVALID and drops the WHOLE message when one
+  // button's `callback_data` is longer than 64 bytes. The region payload carried
+  // the full region id (`srvset:g:<36-char id>:europe-west4-drams3a` = 66 bytes),
+  // so the settings keyboard was rejected and the Netherlands could not be
+  // selected. This pins the limit for every button the screen ships.
+  calls.length = 0
+  const ctx5 = makeCtx()
+  await handleTelegramWebhook(
+    env,
+    ctx5 as any,
+    request({
+      callback_query: {
+        id: 'cb2',
+        data: `srvset:o:${RAILWAY_ID}`,
+        from: { id: TELEGRAM_ID, first_name: 'Milad' },
+        message: { message_id: 7, chat: { id: TELEGRAM_ID } },
+      },
+    }),
+  )
+  await settle(ctx5)
+  const settingsMsg = calls.filter((c) => c.method === 'editMessageText' || c.method === 'sendMessage').at(-1)
+  const settingsKb = inlineOf(settingsMsg)
+  check('صفحهٔ تنظیمات سرویس رندر می‌شود', !!settingsKb, JSON.stringify(settingsMsg?.body ?? null).slice(0, 200))
+  const settingsData = flatButtons(settingsKb)
+    .map((b) => String(b.callback_data ?? ''))
+    .filter(Boolean)
+  check(
+    'همهٔ callback_data ها داخل سقف ۶۴ بایتی هستند',
+    settingsData.length > 0 && settingsData.every((d) => callbackBytes(d) <= CALLBACK_LIMIT),
+    settingsData.map((d) => `${d}=${callbackBytes(d)}`).join(' | '),
+  )
+  check(
+    'دکمهٔ هر چهار منطقه هست و به کد درست اشاره می‌کند',
+    RAILWAY_REGIONS.every((r) => settingsData.includes(`srvset:g:${RAILWAY_ID}:${r.code}`)),
+    settingsData.join(' | '),
+  )
+  check(
+    'کد هر منطقه به همان منطقه برمی‌گردد',
+    RAILWAY_REGIONS.every((r) => railwayRegionFromCode(r.code)?.id === r.id),
+    RAILWAY_REGIONS.map((r) => `${r.code}→${railwayRegionFromCode(r.code)?.id}`).join(', '),
+  )
+  check(
+    'شناسهٔ کامل منطقه (کیبورد قدیمی) هم پذیرفته می‌شود',
+    RAILWAY_REGIONS.every((r) => railwayRegionFromCode(r.id)?.id === r.id),
+  )
 
   console.log(failures ? `\n${failures} بررسی ناموفق ❌` : '\nهمهٔ بررسی‌ها موفق ✅')
   process.exit(failures ? 1 : 0)

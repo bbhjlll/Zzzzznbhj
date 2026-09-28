@@ -278,6 +278,11 @@ const MIGRATIONS = [
   `ALTER TABLE worker_members ADD COLUMN notified_level INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE injector_jobs ADD COLUMN rotate_minutes INTEGER`,
   `ALTER TABLE optimizer_jobs ADD COLUMN opt_options TEXT`,
+  // The region *is* declared on the CREATE TABLE above, which does nothing for a
+  // table that already exists — so a database created before regions were pinned
+  // keeps a `railway_deploys` without the column and every insert/update naming it
+  // fails. Repeated here so an older database migrates like the rest.
+  `ALTER TABLE railway_deploys ADD COLUMN region TEXT NOT NULL DEFAULT 'europe-west4-drams3a'`,
   `ALTER TABLE railway_deploys ADD COLUMN panel TEXT`,
   `ALTER TABLE railway_deploys ADD COLUMN name TEXT`,
   `ALTER TABLE railway_deploys ADD COLUMN current_deployment_id TEXT`,
