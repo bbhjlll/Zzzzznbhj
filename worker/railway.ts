@@ -18,6 +18,7 @@ import {
   panelDataFile,
   panelTcpPorts,
   railwayMultiRegionConfig,
+  railwayRegionLabel,
   resolveRailwayRegion,
   type PanelSpec,
 } from '../shared/panels'
@@ -305,20 +306,62 @@ interface CommittedDeployConfig {
   region?: string | null
 }
 
-async function readCommittedDeployConfig(
+/** The slice of `environment(id).config` these helpers read. */
+interface CommittedEnvironmentConfig {
+  services?: Record<
+    string,
+    {
+      deploy?: CommittedDeployConfig
+      volumeMounts?: Record<string, { mountPath?: string } | null> | null
+    }
+  >
+  volumes?: Record<string, { region?: string | null } | null>
+}
+
+async function readCommittedEnvironmentConfig(
   token: string,
-  serviceId: string,
   environmentId: string,
-): Promise<CommittedDeployConfig | null> {
+): Promise<CommittedEnvironmentConfig | null> {
   const data = await gql(
     token,
     'query ($environmentId: String!) { environment(id: $environmentId) { config } }',
     { environmentId },
   )
-  const config = (data.environment as { config?: unknown } | undefined)?.config
-  const services = (config as { services?: Record<string, unknown> } | null | undefined)?.services
-  const deploy = (services?.[serviceId] as { deploy?: CommittedDeployConfig } | undefined)?.deploy
+  return (data.environment as { config?: CommittedEnvironmentConfig } | undefined)?.config ?? null
+}
+
+async function readCommittedDeployConfig(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+): Promise<CommittedDeployConfig | null> {
+  const config = await readCommittedEnvironmentConfig(token, environmentId)
+  const deploy = config?.services?.[serviceId]?.deploy
   return deploy ?? null
+}
+
+/**
+ * Every volume attached to a service, with the region it is bound to.
+ *
+ * A Railway volume lives in exactly one region and cannot be attached to a
+ * service in another, so a region change on an existing panel has to be told
+ * about the volume it leaves behind — otherwise the change looks applied and the
+ * next deploy fails on the mismatch.
+ */
+export async function readRailwayVolumeRegions(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+): Promise<Array<{ id: string; region: string | null }>> {
+  try {
+    const config = await readCommittedEnvironmentConfig(token, environmentId)
+    const mounts = config?.services?.[serviceId]?.volumeMounts ?? {}
+    const volumes = config?.volumes ?? {}
+    return Object.keys(mounts).map((id) => ({ id, region: volumes[id]?.region ?? null }))
+  } catch {
+    /* verification is best-effort: an unreadable config must not fail a change */
+    return []
+  }
 }
 
 /**
@@ -582,11 +625,12 @@ export async function deployToRailway(
     ).catch(() => null)
   }
 
-  // 3b-2. Pin the deployment region — *before* the volume below, because a
-  //       Railway volume follows the region of its service. Unlike the settings
-  //       above this one is not best-effort: a region Railway refuses means the
-  //       panel would silently run in the workspace's default region (America),
-  //       so the mismatch is surfaced instead of ignored.
+  // 3b-2. Pin the deployment region before anything below creates resources for
+  //       this service. Unlike the settings above this one is not best-effort: a
+  //       region Railway refuses means the panel would silently run in the
+  //       workspace's default region (America), so the mismatch is surfaced
+  //       instead of ignored. The confirmed region is also what the data volume
+  //       below is created in — see the note there.
   const appliedRegion = await applyRailwayRegion(token, serviceId, environmentId, region)
 
   // 3c. Generate a *.up.railway.app domain so the panel is reachable as soon
@@ -606,11 +650,19 @@ export async function deployToRailway(
   // 3d. Attach a persistent volume to the panel's data directory. Railway wipes
   //     the container filesystem on every redeploy, so a panel that keeps its
   //     users/config in SQLite would silently reset to defaults without this.
+  //
+  //     The region is passed explicitly, because a Railway volume is bound to
+  //     one region and does *not* follow its service. Verified against the live
+  //     API: a volume created without one lands in the workspace's preferred
+  //     region (America on a US-preferred account) even when the service is
+  //     pinned to the Netherlands, and the service can then no longer attach its
+  //     own data volume — its deployments fail. That is what kept "it deployed
+  //     to America anyway" alive after the region write itself was fixed.
   if (panel.env.dataDir) {
     await gql(
       token,
       'mutation ($input: VolumeCreateInput!) { volumeCreate(input: $input) { id } }',
-      { input: { projectId, environmentId, serviceId, mountPath: panelDataDir(panel) } },
+      { input: { projectId, environmentId, serviceId, mountPath: panelDataDir(panel), region: appliedRegion } },
     ).catch(() => null)
   }
 
@@ -773,6 +825,37 @@ export async function railwayDeployStatus(token: string, deploymentId: string): 
 }
 
 /**
+ * The deployment a service is actually running right now.
+ *
+ * The id we record at deploy time goes stale the moment anything else queues a
+ * redeploy — every settings change does — and Railway then answers `REMOVED` for
+ * it. Following the service itself is what keeps a healthy panel from being
+ * reported as failed.
+ */
+export async function latestRailwayServiceDeployment(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+): Promise<{ id: string; status: string; url: string | null } | null> {
+  try {
+    const data = await gql(
+      token,
+      'query ($serviceId: String!, $environmentId: String!) { serviceInstance(serviceId: $serviceId, environmentId: $environmentId) { latestDeployment { id status url staticUrl } } }',
+      { serviceId, environmentId },
+    )
+    const dep = (
+      data.serviceInstance as
+        | { latestDeployment?: { id?: string; status?: string; url?: string | null; staticUrl?: string | null } | null }
+        | undefined
+    )?.latestDeployment
+    if (!dep?.id) return null
+    return { id: dep.id, status: dep.status ?? 'UNKNOWN', url: dep.url ?? dep.staticUrl ?? null }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Start a fresh build+deploy of an existing service from the newest commit on
  * the service's tracked branch. This is what "بروزرسانی به آخرین نسخه" does:
  * Railway rebuilds the repository HEAD, so the running panel moves to the
@@ -822,6 +905,45 @@ interface ServiceEdgeState {
  * the cache (`disableServiceCdn` answers `true` and changes nothing).
  */
 const CDN_OFF_MODE = 'off'
+
+/**
+ * The caching mode Railway treats as "CDN on", and the only other value it
+ * accepts — every other spelling is answered with "Problem processing request".
+ *
+ * Turning the CDN back on takes this *and* `enableServiceCdn`, because the mode
+ * is sticky: `enableServiceCdn` flips the edge on but leaves the mode alone, so
+ * a service whose mode we previously set to `off` stays permanently uncached
+ * (verified live: it answers `{enabled: true, caching: {mode: "off"}}` and the
+ * read-back then reports the setting did not change).
+ */
+const CDN_ON_MODE = 'auto'
+
+/** Turn CDN caching on or off, the way Railway actually honours it. */
+async function writeRailwayCdn(
+  token: string,
+  serviceId: string,
+  environmentId: string,
+  on: boolean,
+): Promise<void> {
+  if (on) {
+    await gql(
+      token,
+      'mutation ($input: EnableServiceCdnInput!) { enableServiceCdn(input: $input) { enabled caching { mode } } }',
+      { input: { serviceId, environmentId } },
+    )
+  }
+  await gql(
+    token,
+    'mutation ($input: UpdateServiceEdgeConfigInput!) { updateServiceEdgeConfig(input: $input) { enabled caching { mode } } }',
+    {
+      input: {
+        serviceId,
+        environmentId,
+        config: { caching: { mode: on ? CDN_ON_MODE : CDN_OFF_MODE } },
+      },
+    },
+  )
+}
 
 /** Is CDN caching on for this service? `null` when Railway will not answer. */
 async function readRailwayEdgeEnabled(
@@ -888,11 +1010,12 @@ export interface RailwaySettingsResult {
  *  • `ipv6Egress` → `environmentPatchCommit`: Railway models outbound IPv6 as an
  *    environment config change, and committing that patch also triggers the
  *    redeploy the toggle needs.
- *  • `cdnEnabled` → `enableServiceCdn` to turn it on, and `updateServiceEdgeConfig`
- *    with `caching.mode = "off"` to turn it off. **Not** `disableServiceCdn`:
- *    verified against the live API, that mutation answers `true` and leaves the
- *    cache exactly as it was, so the toggle only ever appeared to work in one
- *    direction. Needs an applied public domain, which a deployed panel has.
+ *  • `cdnEnabled` → `enableServiceCdn` **plus** `updateServiceEdgeConfig` with
+ *    `caching.mode = "auto"` to turn it on, and just the caching mode `"off"`
+ *    to turn it off. **Not** `disableServiceCdn`: verified against the live API,
+ *    that mutation answers `true` and leaves the cache exactly as it was, so the
+ *    toggle only ever appeared to work in one direction. Needs an applied public
+ *    domain, which a deployed panel has.
  *
  * Region and serverless are sent as **separate** mutations on purpose. Railway
  * fails the whole `serviceInstanceUpdate` for a single unknown field, and its
@@ -911,11 +1034,24 @@ export async function updateRailwayServiceSettings(
 
   if (opts.region) {
     result.region = await applyRailwayRegion(token, opts.serviceId, opts.environmentId, opts.region)
+
+    // A data volume is bound to one region and cannot follow its service. Moving
+    // the service off the volume's region therefore leaves the panel without its
+    // data on the next deploy — say so instead of reporting a clean move.
+    const stale = (await readRailwayVolumeRegions(token, opts.serviceId, opts.environmentId)).filter(
+      (v) => v.region && (resolveRailwayRegion(v.region) ?? v.region) !== result.region,
+    )
+    if (stale.length) {
+      const where = Array.from(new Set(stale.map((v) => railwayRegionLabel(v.region)))).join('، ')
+      result.warning = `منطقه روی ${railwayRegionLabel(result.region)} ثبت شد، اما حجم دادهٔ پنل در ${where} ساخته شده و Railway آن را روی سرویس منطقهٔ جدید سوار نمی‌کند — پنل را از نو مستقر کنید تا داده هم در منطقهٔ جدید ساخته شود`
+    }
+
     try {
       result.redeployId = await railwayRedeploy(token, opts.serviceId, opts.environmentId)
     } catch (err) {
       const reason = err instanceof RailwayApiError ? err.message : 'دستور راه‌اندازی مجدد پذیرفته نشد'
-      result.warning = `منطقه روی ${result.region} ثبت شد اما برای اعمال آن یک راه‌اندازی مجدد لازم است و ناموفق بود (${reason}) — از دکمهٔ «بروزرسانی به آخرین نسخه» استفاده کنید`
+      const notice = `منطقه روی ${railwayRegionLabel(result.region)} ثبت شد اما برای اعمال آن یک راه‌اندازی مجدد لازم است و ناموفق بود (${reason}) — از دکمهٔ «بروزرسانی به آخرین نسخه» استفاده کنید`
+      result.warning = result.warning ? `${result.warning} — ${notice}` : notice
     }
   }
 
@@ -940,41 +1076,15 @@ export async function updateRailwayServiceSettings(
   }
 
   if (typeof opts.cdnEnabled === 'boolean') {
-    if (opts.cdnEnabled) {
-      await gql(
-        token,
-        'mutation ($input: EnableServiceCdnInput!) { enableServiceCdn(input: $input) { enabled caching { mode } } }',
-        { input: { serviceId: opts.serviceId, environmentId: opts.environmentId } },
-      )
-    } else {
-      // The caching *mode* is the switch Railway actually honours (`off` is what
-      // the read above treats as disabled); `disableServiceCdn` is a no-op that
-      // still answers `true`.
-      await gql(
-        token,
-        'mutation ($input: UpdateServiceEdgeConfigInput!) { updateServiceEdgeConfig(input: $input) { enabled caching { mode } } }',
-        {
-          input: {
-            serviceId: opts.serviceId,
-            environmentId: opts.environmentId,
-            config: { caching: { mode: CDN_OFF_MODE } },
-          },
-        },
-      )
-    }
+    // The caching *mode* is the switch Railway actually honours; `disableServiceCdn`
+    // is a no-op that still answers `true`, and `enableServiceCdn` alone cannot
+    // bring the cache back once the mode is `off`.
+    await writeRailwayCdn(token, opts.serviceId, opts.environmentId, opts.cdnEnabled)
     // Verify rather than trust: a mutation Railway accepted is not the same as a
     // setting that changed, which is the whole lesson of this file.
     let cdn = await readRailwayEdgeEnabled(token, opts.serviceId, opts.environmentId)
     if (cdn !== null && cdn !== opts.cdnEnabled) {
-      await gql(
-        token,
-        opts.cdnEnabled
-          ? 'mutation ($input: EnableServiceCdnInput!) { enableServiceCdn(input: $input) { enabled caching { mode } } }'
-          : 'mutation ($input: UpdateServiceEdgeConfigInput!) { updateServiceEdgeConfig(input: $input) { enabled caching { mode } } }',
-        opts.cdnEnabled
-          ? { input: { serviceId: opts.serviceId, environmentId: opts.environmentId } }
-          : { input: { serviceId: opts.serviceId, environmentId: opts.environmentId, config: { caching: { mode: CDN_OFF_MODE } } } },
-      )
+      await writeRailwayCdn(token, opts.serviceId, opts.environmentId, opts.cdnEnabled)
       cdn = await readRailwayEdgeEnabled(token, opts.serviceId, opts.environmentId)
     }
     if (cdn !== null && cdn !== opts.cdnEnabled) {

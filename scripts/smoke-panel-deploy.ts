@@ -415,6 +415,16 @@ async function main() {
   // so the engine must ask for one at the panel's data path.
   const volCall = calls.find((c) => (c.body ?? '').includes('volumeCreate'))
   check('data volume requested at /data', !!volCall && (volCall.body ?? '').includes('/data'), volCall?.body?.slice(0, 160))
+  // Regression, verified live: a Railway volume is bound to one region and does
+  // not follow its service. Created without a region it lands in the workspace's
+  // preferred one (America on a US-preferred account), and the service pinned to
+  // the Netherlands can then no longer attach its own data volume — its deploys
+  // fail. The volume has to be created in the region we just pinned.
+  check(
+    'data volume is created in the region the service was pinned to',
+    !!volCall && (volCall.body ?? '').includes('europe-west4-drams3a'),
+    volCall?.body?.slice(0, 220),
+  )
   // Regression: the panel is handed the SQLite *file* inside the volume. Passing
   // the mount directory itself makes sqlite3 fail on boot (a live Railway
   // deploy crashed with "unable to open database file" because of it).
@@ -656,15 +666,18 @@ async function main() {
     panel: panel.id, name: 'settings-app', region: 'europe-west4', setup_done: 1, created_at: '2026-05-05T00:00:00.000Z',
   })
   calls.length = 0
-  // region update + read-back + redeploy, then serverless (separate mutation),
-  // then IPv6 (environmentPatchCommit) and CDN (enableServiceCdn).
+  // region update + read-back + volume-region read + redeploy, then serverless
+  // (separate mutation), then IPv6 (environmentPatchCommit) and CDN
+  // (enableServiceCdn).
   gqlQueue = [
     {},                                                             // region update (multiRegionConfig)
     { environment: { config: { services: { svcS: { deploy: { multiRegionConfig: { 'us-west2': { numReplicas: 1 } } } } } } } }, // region read-back
+    { environment: { config: { services: { svcS: { deploy: { multiRegionConfig: { 'us-west2': { numReplicas: 1 } } } } } } } }, // volume-region read (no volume attached)
     { serviceInstanceDeployV2: 'set1-move' },                       // redeploy that moves it
     {},                                                             // serverless
     {},                                                             // environmentPatchCommit (IPv6)
-    { enableServiceCdn: { enabled: true, caching: { mode: 'auto' } } }, // CDN on
+    { enableServiceCdn: { enabled: true, caching: { mode: 'off' } } }, // CDN edge on… (mode untouched)
+    { updateServiceEdgeConfig: { enabled: true, caching: { mode: 'auto' } } }, // …and the cache itself on
     // The write is verified, not trusted: `disableServiceCdn` used to answer
     // `true` while changing nothing, so the state is read back after every write.
     { serviceInstance: { edgeConfig: { enabled: true, caching: { mode: 'auto' } } } },
@@ -722,6 +735,14 @@ async function main() {
   const ipv6Body = calls.map((c) => c.body ?? '').find((b) => b.includes('environmentPatchCommit')) ?? ''
   check('IPv6 committed as an environment patch', ipv6Body.includes('ipv6EgressEnabled') && ipv6Body.includes('svcS'), ipv6Body.slice(0, 220))
   check('CDN enabled through enableServiceCdn', calls.some((c) => (c.body ?? '').includes('enableServiceCdn')))
+  // Regression, verified live: `enableServiceCdn` flips the edge on but leaves
+  // the caching *mode* alone, so a service whose mode we set to `off` stayed
+  // uncached forever and the toggle could never be turned back on. Enabling now
+  // also commits the one mode Railway accepts for "on" (`auto`).
+  const onModeBody = calls
+    .map((c) => c.body ?? '')
+    .find((b) => b.includes('updateServiceEdgeConfig') && b.includes('"mode":"auto"'))
+  check('turning the CDN back on also re-enables the caching mode', !!onModeBody, onModeBody?.slice(0, 200))
   check('settings change logged', [...env.tables.activity_logs.values()].some((l) => l['action'] === 'panel_settings_changed'))
 
   // Turning it off goes through the caching mode: `disableServiceCdn` is a
@@ -732,7 +753,7 @@ async function main() {
     { serviceInstance: { edgeConfig: { enabled: true, caching: { mode: 'off' } } } }, // verified off
   ]
   const cdnOff = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { cdnEnabled: false })
-  const offBody = calls.map((c) => c.body ?? '').find((b) => b.includes('updateServiceEdgeConfig')) ?? ''
+  const offBody = calls.map((c) => c.body ?? '').filter((b) => b.includes('updateServiceEdgeConfig')).pop() ?? ''
   check('CDN disabled through the caching mode', cdnOff.ok === true && offBody.includes('"mode":"off"'), offBody.slice(0, 200))
   check('the ignored disableServiceCdn mutation is never used', !calls.some((c) => (c.body ?? '').includes('disableServiceCdn')))
   check('a CDN change that did not stick is a warning, not a silent success', cdnOff.warning === null || typeof cdnOff.warning === 'string')
@@ -814,6 +835,63 @@ async function main() {
     .map((c) => c.body ?? '')
     .filter((b) => b.includes('multiRegionConfig') && b.includes('europe-west4-drams3a')).length
   check('the region write was re-sent until it stuck', raceWrites >= 3, String(raceWrites))
+
+  console.log('20) moving a live panel says when its data volume stays behind')
+  // A volume cannot follow its service to another region, so a region change on
+  // an existing panel leaves the data behind. That must be reported, not hidden
+  // behind a clean-looking success.
+  const volumeStaysInAmerica = {
+    environment: {
+      config: {
+        services: {
+          svcS: {
+            deploy: { multiRegionConfig: { 'europe-west4-drams3a': { numReplicas: 1 } } },
+            volumeMounts: { vol1: { mountPath: '/data' } },
+          },
+        },
+        volumes: { vol1: { region: 'sfo' } },
+      },
+    },
+  }
+  gqlQueue = [
+    {},                       // region write
+    volumeStaysInAmerica,     // region read-back
+    volumeStaysInAmerica,     // volume-region read
+    { serviceInstanceDeployV2: 'moved-with-volume' },
+  ]
+  const movedWithVolume = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { region: 'europe-west4-drams3a' })
+  check('a region change still applies', movedWithVolume.ok === true, JSON.stringify(movedWithVolume).slice(0, 200))
+  check(
+    'the moved panel is warned that its data volume is in the old region',
+    movedWithVolume.ok === true && !!movedWithVolume.warning && movedWithVolume.warning.includes('حجم داده'),
+    movedWithVolume.ok ? String(movedWithVolume.warning) : '',
+  )
+  check('the confirmed region is still recorded', env.tables.railway_deploys.get('set1')?.['region'] === 'europe-west4-drams3a', String(env.tables.railway_deploys.get('set1')?.['region']))
+
+  console.log('21) a panel Railway replaced is not reported as failed')
+  // Every settings change queues its own redeploy, so the deployment id the row
+  // holds is answered `REMOVED` while the service keeps serving the newer one.
+  // Reporting the panel as failed there is exactly what "the settings broke my
+  // panel" looks like; and a serverless panel sits in `SLEEPING`, which is
+  // healthy, not "still building".
+  env.tables.railway_deploys.set('stale1', {
+    id: 'stale1', user_id: 'u1', token_id: 'rt1', project_id: 'prjStale', service_id: 'svcStale',
+    environment_id: 'envStale', panel: panel.id, name: 'stale-app', domain: 'stale.up.railway.app',
+    current_deployment_id: 'dep-old', setup_done: 1, created_at: '2026-05-05T00:00:00.000Z',
+  })
+  gqlQueue = [
+    { deployment: { id: 'dep-old', status: 'REMOVED', url: null, staticUrl: null } },
+    { serviceInstance: { latestDeployment: { id: 'dep-new', status: 'SLEEPING', url: null, staticUrl: 'stale.up.railway.app' } } },
+  ]
+  const replaced = await watchPanelDeploy(env as never, 'u1', 'railway', 'stale1')
+  check('a replaced deployment follows the service’s newest one', replaced.state === 'live' && replaced.status === 'SLEEPING', JSON.stringify(replaced))
+  check('the live url is still reported', replaced.url === 'https://stale.up.railway.app', String(replaced.url))
+
+  // A real failure must still be a failure.
+  env.tables.railway_deploys.set('stale1', { ...env.tables.railway_deploys.get('stale1')!, current_deployment_id: 'dep-new' })
+  gqlQueue = [{ deployment: { id: 'dep-new', status: 'CRASHED', url: null, staticUrl: null } }]
+  const crashed = await watchPanelDeploy(env as never, 'u1', 'railway', 'stale1')
+  check('a crashed deployment is still a failure', crashed.state === 'failed' && crashed.status === 'CRASHED', JSON.stringify(crashed))
 
   const badRegion = await updatePanelSettings(env as never, 'u1', 'railway', 'set1', { region: 'mars-1' })
   check('unknown region refused before hitting Railway', badRegion.ok === false, JSON.stringify(badRegion))

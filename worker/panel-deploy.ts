@@ -10,7 +10,7 @@
 import type { Env } from './env'
 import { genId, nowIso } from './util'
 import { DEFAULT_RAILWAY_REGION, panelBranch, resolvePanel, resolveRailwayRegion, type PanelCapability, type PanelSpec } from '../shared/panels'
-import { deployToRailway, RailwayApiError, railwayDeployStatus, railwayRedeploy, updateRailwayPanel, updateRailwayServiceSettings } from './railway'
+import { deployToRailway, latestRailwayServiceDeployment, RailwayApiError, railwayDeployStatus, railwayRedeploy, updateRailwayPanel, updateRailwayServiceSettings } from './railway'
 import { deployToRender, RenderApiError, renderDeployStatus, renderRedeploy } from './render'
 import { notifyDeployment } from './telegram-core'
 
@@ -190,7 +190,21 @@ interface RailRec {
   admin_password: string | null
   setup_done: number
   token_id: string
+  service_id: string | null
+  environment_id: string | null
 }
+
+/**
+ * Deployment states that mean the panel is up.
+ *
+ * `SLEEPING` is Railway's serverless idle state — the container is stopped until
+ * the next request, not broken — so a panel with "اشتراک سرورلس" switched on
+ * must not be reported as still building forever.
+ */
+const LIVE_DEPLOY_STATUSES = new Set(['SUCCESS', 'SLEEPING'])
+
+/** Railway states that mean the build itself went wrong. */
+const FAILED_DEPLOY_STATUSES = new Set(['FAILED', 'CRASHED'])
 
 interface RenderRec {
   name: string | null
@@ -210,7 +224,7 @@ interface RenderRec {
 export async function watchPanelDeploy(env: Env, userId: string, platform: PanelPlatform, deployId: string): Promise<PanelWatchResult> {
   try {
     if (platform === 'railway') {
-      const rec = await env.DB.prepare('SELECT name, domain, panel, current_deployment_id, project_token, admin_username, admin_password, setup_done, token_id FROM railway_deploys WHERE id = ? AND user_id = ?')
+      const rec = await env.DB.prepare('SELECT name, domain, panel, current_deployment_id, project_token, admin_username, admin_password, setup_done, token_id, service_id, environment_id FROM railway_deploys WHERE id = ? AND user_id = ?')
         .bind(deployId, userId)
         .first<RailRec>()
       if (!rec) return { state: 'pending', status: 'NOT_FOUND', url: null }
@@ -219,8 +233,16 @@ export async function watchPanelDeploy(env: Env, userId: string, platform: Panel
 
       const statusId = rec.current_deployment_id || deployId
       let status = await railwayDeployStatus(token, statusId)
-      if (status.status !== 'SUCCESS') {
-        const failed = ['FAILED', 'CRASHED', 'REMOVED'].includes(status.status)
+      // Railway reports a deployment that a later one replaced as `REMOVED`. Every
+      // settings change queues its own redeploy, so the id we recorded goes stale
+      // while the service keeps serving the newer deployment — follow the service
+      // instead of reporting a healthy panel as failed (or stuck) forever.
+      if (status.status === 'REMOVED' && rec.service_id && rec.environment_id) {
+        const latest = await latestRailwayServiceDeployment(token, rec.service_id, rec.environment_id)
+        if (latest && latest.id !== statusId) status = { status: latest.status, url: latest.url ?? status.url }
+      }
+      if (!LIVE_DEPLOY_STATUSES.has(status.status)) {
+        const failed = FAILED_DEPLOY_STATUSES.has(status.status)
         return { state: failed ? 'failed' : 'pending', status: status.status, url: status.url }
       }
 
