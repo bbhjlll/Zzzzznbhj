@@ -16,7 +16,7 @@ import {
   panelBranch,
   panelDataDir,
   panelDataFile,
-  panelTcpPorts,
+  panelDeployerTcpPorts,
   railwayMultiRegionConfig,
   railwayRegionLabel,
   resolveRailwayRegion,
@@ -215,7 +215,13 @@ export interface RailwayDeployResult {
   projectToken?: string | null
   /** First (direct) proxy — kept for the single-proxy card fields. */
   tcpProxy?: RailwayTcpProxy | null
-  /** Every capability that got its own proxy, in catalog order. */
+  /**
+   * The proxies this deploy created itself, in catalog order.
+   *
+   * Only the panel's always-on direct port is ever here: every opt-in raw port
+   * gets its proxy from the panel, which is the component that knows whether the
+   * capability is switched on.
+   */
   tcpProxies?: RailwayTcpProxy[]
   tcpProxyError?: string | null
   projectUrl: string
@@ -667,8 +673,11 @@ export async function deployToRailway(
   }
 
   // 3e. Create a project-scoped token for this deployment. The panel receives
-  //     it as NEXUS_RAILWAY_TOKEN and can then create/update its own TCP proxies
-  //     without retaining the user's broad Account token.
+  //     it as NEXUS_RAILWAY_TOKEN (an operator override its own TCP-proxy manager
+  //     reads first) and can then create/update its own TCP proxies without
+  //     retaining the user's broad Account token. The project id below is the
+  //     other half of that: Railway injects the environment and service ids but
+  //     never the project id, and the panel's pass is *off* without one.
   let projectToken: string | null = null
   try {
     const tokenData = await gql(
@@ -681,15 +690,21 @@ export async function deployToRailway(
     /* web deployment continues with the account token as a fallback */
   }
 
-  // 3f. Publish every declared raw-TCP capability (Reality, MTProto and the HTTP
-  //     web proxy on Mizetusi). Railway gives each one a random public port, so
-  //     a card that published only the first would hand out two links that
-  //     answer nothing. The API requires one redeploy after creation; the
-  //     explicit deployment below provides it. A failure is non-fatal per
-  //     capability — the HTTPS panel still boots and the rest still publish.
+  // 3f. Publish the panel's always-on direct port (Reality). Every *other* raw
+  //     port is the panel's own job now: it drives the same `tcpProxyCreate`
+  //     mutation itself, one proxy per capability its admin has switched on, and
+  //     remembers the random public port Railway hands back. Pre-opening those
+  //     here would leave a public address in front of a listener that is still
+  //     off — the exact dead link this engine exists to avoid — and the panel
+  //     would only ever see them as proxies it must not duplicate. Reality has
+  //     no switch, so it is the one port whose proxy belongs to the deploy.
+  //     Railway gives it a random public port, and the API requires one redeploy
+  //     after creation; the explicit deployment below provides it. A failure is
+  //     non-fatal — the HTTPS panel still boots and the panel creates its own
+  //     proxies once it is up.
   const tcpProxies: RailwayTcpProxy[] = []
   const tcpErrors: string[] = []
-  for (const capability of panelTcpPorts(panel)) {
+  for (const capability of panelDeployerTcpPorts(panel)) {
     try {
       const proxyData = await gql(
         token,
@@ -716,6 +731,9 @@ export async function deployToRailway(
   const envVars = buildPanelDeployEnv(panel, 'railway', {
     ...values,
     railwayToken: projectToken ?? undefined,
+    // Without the project id the panel's own TCP-proxy pass answers «شناسه‌های
+    // پروژه/محیط/سرویس رِیلوی در دسترس نیست» and no raw port is ever forwarded.
+    railwayProjectId: projectId,
     publicBaseUrl: domain ? `https://${domain}` : undefined,
   })
   // Only when a volume is attached: the container needs to own the root-owned

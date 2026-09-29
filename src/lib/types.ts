@@ -222,8 +222,12 @@ export interface HostedPanelSpec {
   repoUrl: string
   port: number
   extraPorts: number[]
-  /** Raw-TCP capabilities this panel publishes, with their labels. */
-  tcpPorts: Array<{ port: number; label: string }>
+  /**
+   * Raw-TCP listeners this panel can publish, with their labels. `always` marks
+   * the one the deployer publishes itself; the rest are published by the panel
+   * once its admin enables that capability.
+   */
+  tcpPorts: Array<{ port: number; label: string; always?: boolean }>
   panelPath: string
   healthPath: string
   origin: string | null
@@ -256,7 +260,10 @@ export interface HostedPanelDeploy {
   commitUrl: string | null
   autoDeploy: boolean
   tcpProxy: { domain: string; port: number; applicationPort: number } | null
-  /** Every published raw-TCP capability (Reality, MTProto, HTTP …). */
+  /**
+   * The proxies the deploy created itself (the always-on direct port). Opt-in
+   * raw ports are published by the panel, so they are not listed here.
+   */
   tcpProxies: Array<{ label: string; domain: string; port: number; applicationPort: number }>
   tcpProxyError: string | null
   createdAt: string | null

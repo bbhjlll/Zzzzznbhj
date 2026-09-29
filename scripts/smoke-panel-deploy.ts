@@ -280,11 +280,11 @@ async function main() {
     { serviceDomainCreate: { domain: 'my-app.up.railway.app' } },   // domain
     { volumeCreate: { id: 'vol1' } },                               // data volume
     { projectTokenCreate: 'project-token-1' },                      // project-scoped token
+    // Only the always-on direct port: every opt-in raw port is the panel's own
+    // to publish, and it creates that proxy once its admin enables the port.
     { tcpProxyCreate: { id: 'tcp1', domain: 'proxy1.rlwy.net', proxyPort: 23177, applicationPort: 8443 } },
-    { tcpProxyCreate: { id: 'tcp2', domain: 'proxy2.rlwy.net', proxyPort: 23178, applicationPort: 8446 } },
-    { tcpProxyCreate: { id: 'tcp3', domain: 'proxy3.rlwy.net', proxyPort: 23179, applicationPort: 8448 } },
     // Complete manifest + RAILWAY_RUN_UID. Every write skips its own deploy.
-    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
     { serviceInstanceAutoDeployUpdate: { enabled: true } },          // future GitHub pushes
     {},                                                             // region re-assert before the build
     { environment: { config: { services: { svc1: { deploy: { multiRegionConfig: { 'europe-west4-drams3a': { numReplicas: 1 } } } } } } } },
@@ -299,11 +299,14 @@ async function main() {
     check('deploy row persisted', !!row && row['panel'] === panel.id && row['admin_password'] === r.adminPassword)
     check('project token persisted privately', row?.['project_token'] === 'project-token-1')
     check('TCP proxy persisted', row?.['tcp_proxy_domain'] === 'proxy1.rlwy.net' && row?.['tcp_proxy_port'] === 23177)
-    // Every raw port gets its own public proxy: reality + mtproto + web-http.
+    // Exactly one proxy belongs to the deploy: the direct (Reality) port. Every
+    // other raw port is published by the panel itself, and only after its admin
+    // has switched that capability on — publishing one earlier would open a
+    // public address in front of a listener that is still off.
     const storedProxies = JSON.parse(String(row?.['tcp_proxies'] ?? '[]')) as Array<{ applicationPort: number; label?: string }>
     check(
-      'all three raw ports proxied',
-      storedProxies.length === 3 && [8443, 8446, 8448].every((p) => storedProxies.some((t) => t.applicationPort === p)),
+      'only the always-on direct port is proxied by the deploy',
+      storedProxies.length === 1 && storedProxies[0]?.applicationPort === 8443,
       JSON.stringify(storedProxies),
     )
     check('latest commit persisted', row?.['commit_sha'] === 'abc123def456' && row?.['current_deployment_id'] === 'dep1')
@@ -364,20 +367,13 @@ async function main() {
   const panelPosts = (endpoint: string) => calls.filter((c) => c.url.includes('my-app.up.railway.app') && c.method === 'POST' && c.url.includes(endpoint))
   const setupCalls = panelPosts(panel.setupPath ?? '/__no_setup__')
   check(`setup POSTs on first poll (${expectedSetupPosts})`, setupCalls.length === expectedSetupPosts, `got ${setupCalls.length}`)
-  // The panel ships with the raw-port listeners off; the deploy flips them on
-  // through its own save API right after it comes up.
+  // The panel switches nothing on by itself — upstream says so in as many words —
+  // so the deploy must not either: a public port in front of a listener nobody
+  // binds is exactly the dead link this engine exists to avoid, and the Telegram
+  // WEB proxy in particular would put a recognisable signature on the panel's
+  // own domain.
   const capabilityPosts = panelPosts('/api/telegram')
-  check(
-    'raw-port capabilities enabled once',
-    capabilityPosts.length === 1,
-    `got ${capabilityPosts.length}`,
-  )
-  if (capabilityPosts[0]) {
-    const sent = JSON.parse(capabilityPosts[0].body ?? '{}') as Record<string, Record<string, unknown>>
-    check('mtproto enabled', sent['mtproto']?.['enabled'] === '1', capabilityPosts[0].body ?? '')
-    check('web-http enabled', sent['webproxy']?.['web-http']?.['enabled'] === '1', capabilityPosts[0].body ?? '')
-    check('admin password sent as header', !!capabilityPosts[0].headers?.['x-admin-password'])
-  }
+  check('deploy never flips a panel switch on its own', capabilityPosts.length === 0, `got ${capabilityPosts.length}`)
   check('capabilities reported ok', w1.state === 'live' && w1.capabilitiesError == null, w1.state === 'live' ? String(w1.capabilitiesError) : '')
   const afterRow = env.tables.railway_deploys.get('dep1')
   check('setup_done flipped', afterRow?.['setup_done'] === 1, `row=${JSON.stringify(afterRow)}`)
@@ -388,7 +384,7 @@ async function main() {
   check('still live', w2.state === 'live')
   check('firstLive=false', w2.state === 'live' && w2.firstLive === false)
   check('no repeat setup POST', panelPosts(panel.setupPath ?? '/__no_setup__').length === expectedSetupPosts)
-  check('no repeat capability POST', panelPosts('/api/telegram').length === 1)
+  check('still no capability POST on the second poll', panelPosts('/api/telegram').length === 0)
 
   console.log('6) render token on a railway-only panel → mismatch error')
   // Same trick the other way round: a railway-only variant must reject a Render key.
@@ -448,6 +444,14 @@ async function main() {
   check('automatic GitHub deploys enabled', calls.some((c) => (c.body ?? '').includes('serviceInstanceAutoDeployUpdate') && (c.body ?? '').includes('"enabled":true')))
   check('initial deploy pins latest SHA', calls.some((c) => (c.body ?? '').includes('serviceInstanceDeployV2') && (c.body ?? '').includes('"commitSha":"abc123def456"')))
   check('full runtime manifest injected', ['NEXUS_PLATFORM', 'XRAY_ENABLED', 'WARP_ENABLED', 'NEXUS_HTTP_PORT', 'PUBLIC_BASE_URL', 'NEXUS_RAILWAY_TOKEN'].every((name) => varBodies.some((body) => body.includes(name))))
+  // Without the project id the panel's own TCP-proxy pass refuses to run, so a
+  // deployment that omitted it could never publish a raw-TCP port at all.
+  check(
+    'the Railway project id is handed to the panel',
+    ['NEXUS_RAILWAY_PROJECT_ID'].every((name) => varBodies.some((body) => body.includes(name))),
+    varBodies.filter((b) => b.includes('NEXUS_RAILWAY')).join(' · '),
+  )
+  check('the project id value is the project we created', varBodies.some((b) => b.includes('NEXUS_RAILWAY_PROJECT_ID') && b.includes('"prj1"')))
   const dates = registry.map((r) => String(r.createdAt ?? ''))
   check('newest first', dates.every((d, i) => i === 0 || dates[i - 1] >= d), dates.join(' > '))
 
@@ -628,9 +632,7 @@ async function main() {
     { volumeCreate: { id: 'vol1' } },
     { projectTokenCreate: 'project-token-9' },
     { tcpProxyCreate: { id: 'tcp1', domain: 'p1.rlwy.net', proxyPort: 23177, applicationPort: 8443 } },
-    { tcpProxyCreate: { id: 'tcp2', domain: 'p2.rlwy.net', proxyPort: 23178, applicationPort: 8446 } },
-    { tcpProxyCreate: { id: 'tcp3', domain: 'p3.rlwy.net', proxyPort: 23179, applicationPort: 8448 } },
-    ...Array.from({ length: 11 }, () => ({})),
+    ...Array.from({ length: 12 }, () => ({})),
     { serviceInstanceAutoDeployUpdate: { enabled: true } },
     {},                                                             // region re-assert before the build
     { environment: { config: { services: { [ids.svc]: { deploy: { multiRegionConfig: { 'europe-west4-drams3a': { numReplicas: 1 } } } } } } } },

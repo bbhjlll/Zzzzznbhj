@@ -255,8 +255,13 @@ export async function watchPanelDeploy(env: Env, userId: string, platform: Panel
         if (panel.setupPath && rec.admin_username && rec.admin_password) {
           await bootstrapPanelAdmin(`${url}${panel.setupPath}`, rec.admin_username, rec.admin_password)
         }
-        // Switch the published raw-TCP capabilities on inside the panel, so the
-        // ports Railway now forwards to really have a listener behind them.
+        // Ask the panel to switch its raw-TCP capabilities on — but only for a
+        // panel that declares some, and the shipped one declares none on purpose.
+        // Its own boot pass states the rule («a fresh deployment switches nothing
+        // on by itself»): a public port in front of a listener nobody binds is a
+        // dead link, and the Telegram WEB proxy would put a recognisable
+        // signature on the panel's own domain. The call stays so a panel that
+        // does declare a switch still gets it flipped.
         if (rec.admin_password) {
           capabilitiesError = await enablePanelCapabilities(url, rec.admin_password, panel.capabilities)
         }
@@ -361,7 +366,11 @@ export interface PanelDeployRow {
   autoDeploy: boolean
   /** First (direct) TCP proxy — kept for the compact card summary. */
   tcpProxy: { domain: string; port: number; applicationPort: number } | null
-  /** Every published raw-TCP capability, in catalog order. */
+  /**
+   * The proxies this deployment created itself, in catalog order — the always-on
+   * direct port. Opt-in raw ports get their proxy from the panel, so they show
+   * up in the panel's own card rather than here.
+   */
   tcpProxies: Array<{ label: string; domain: string; port: number; applicationPort: number }>
   tcpProxyError: string | null
   createdAt: string | null
@@ -487,8 +496,9 @@ export async function listPanelDeploys(env: Env, userId: string): Promise<PanelD
 
 /**
  * The stored proxy list, tolerating a row written before the JSON column
- * existed: those deployments have only the single-proxy columns, and the panel
- * catalog says which capability that first port belongs to.
+ * existed. Such a row has only the legacy single-proxy columns, and that first
+ * proxy has always been the direct one — Reality is the one raw port the deploy
+ * opens itself, and every other port is published by the panel.
  */
 function parseTcpProxies(
   raw: string | null,
@@ -976,14 +986,19 @@ async function bootstrapPanelAdmin(setupUrl: string, username: string, password:
 }
 
 /**
- * Switch the panel's own raw-TCP capabilities on (MTProto, the HTTP web proxy)
- * right after it first answers.
+ * Switch a panel's own raw-TCP capabilities on right after it first answers.
  *
- * The panel ships with those listeners off — a published port in front of a
- * socket nobody binds is the exact failure this deploy engine exists to avoid,
- * so whoever created the deployment also makes the decision. The panel accepts
- * the admin password as a header (`x-admin-password`), which saves a login round
- * trip, and its save endpoint reconciles the listeners before it answers.
+ * `capabilities` comes from the catalog, and the shipped panel declares **none**:
+ * its upstream pass states the rule ("a fresh deployment switches nothing on by
+ * itself"), because a published port in front of a socket nobody binds is the
+ * exact failure this deploy engine exists to avoid — and the Telegram WEB proxy
+ * would put a recognisable signature on the panel's own domain. The mechanism is
+ * kept for a panel that does declare a switch, and the *panel* is now the
+ * component that publishes the port, once its admin has enabled that capability.
+ *
+ * The panel accepts the admin password as a header (`x-admin-password`), which
+ * saves a login round trip, and its save endpoint reconciles the listeners
+ * before it answers.
  *
  * Returns a readable reason instead of throwing: a panel that is merely slow to
  * accept the write must not be reported as a failed deployment.

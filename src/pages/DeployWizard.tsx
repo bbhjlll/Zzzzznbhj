@@ -18,7 +18,7 @@ import {
   TrainFront,
 } from 'lucide-react'
 import JSZip from 'jszip'
-import { generateDockerCompose, generateNginxConf, generateEnvFile, generateDeployScript, generateRailwayDockerfile, generateRailwayToml, generateRailwayReadme } from '../lib/vps-deploy'
+import { generateDockerCompose, generateNginxConf, generateEnvFile, generateDeployScript, generateRailwayEnvFile, generateRailwayReadme } from '../lib/vps-deploy'
 import type { CFToken, RailwayToken, RenderToken } from '../lib/types'
 import { DEFAULT_RAILWAY_REGION, PANELS, railwayRegionLabel } from '../../shared/panels'
 
@@ -441,8 +441,9 @@ export default function DeployWizard() {
         const cfg = { name, uuid, adminPassword: adminPassword || uuid, domain: '', port: vpsPort, panel: PANEL.id }
         const zip = new JSZip()
         if (isRailway) {
-          zip.file('Dockerfile', generateRailwayDockerfile(cfg))
-          zip.file('railway.toml', generateRailwayToml(cfg))
+          // No Dockerfile / railway.toml: the panel's repository already ships
+          // both, and only its image installs every engine the panel runs.
+          zip.file('railway.env', generateRailwayEnvFile(cfg))
           zip.file('README.md', generateRailwayReadme(cfg))
         } else {
           zip.file('docker-compose.yml', generateDockerCompose(cfg))
@@ -461,8 +462,7 @@ export default function DeployWizard() {
         setDeployLogs([
           'فایل‌ها تولید شدند ✓',
           ...(isRailway ? [
-            `Dockerfile ✓`,
-            `railway.toml ✓`,
+            `railway.env ✓`,
             `README.md ✓`,
           ] : [
             `docker-compose.yml ✓`,
@@ -476,9 +476,10 @@ export default function DeployWizard() {
           '',
           'برای استقرار:',
           ...(isRailway ? [
-            '1. فایل‌ها را در مخزن GitHub قرار دهید',
+            '1. مخزن را فورک کنید (Dockerfile و railway.json خودش را دست نزنید)',
             '2. به railway.app/new بروید',
-            '3. Deploy from GitHub → مخزن را انتخاب کنید',
+            '3. Deploy from GitHub → فورک خود را انتخاب کنید',
+            '4. متغیرهای railway.env را در Variables بگذارید',
           ] : [
             '1. ZIP را به VPS آپلود کنید',
             '2. استخراج: unzip ' + name + `-${PANEL.id}.zip`,

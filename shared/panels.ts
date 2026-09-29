@@ -51,6 +51,18 @@ export interface PanelEnvNames {
   warpEnabled?: string
   /** Railway project token consumed by the panel's TCP-proxy manager. */
   railwayToken?: string
+  /**
+   * Railway **project id**.
+   *
+   * Railway injects the environment and the service id into every deployment
+   * but *not* the project id, and the panel's own TCP-proxy pass refuses to run
+   * without one (`railway.configured()` wants the token, project, environment
+   * and service together). A deployment that omits this therefore can never
+   * publish a raw-TCP port, however many capabilities the admin switches on —
+   * which on Railway means no Reality, no AnyTLS, no MTProto and no web proxy,
+   * because only a TCP proxy can forward them.
+   */
+  railwayProjectId?: string
   /** Explicit HTTP port used when Railway's injected PORT names a raw transport. */
   httpPort?: string
   /** Direct endpoint host/port for VPS-style deployments. */
@@ -62,12 +74,32 @@ export interface PanelEnvNames {
 export interface PanelTcpPort {
   port: number
   label: string
+  /**
+   * The deployer publishes this port itself, when it creates the deployment.
+   *
+   * Only a listener that binds with no switch to flip may be flagged. On the
+   * shipped panel that is exactly one: the direct (Reality) transport, which is
+   * why a fresh Railway deployment has a working direct endpoint before anybody
+   * opens the panel. Every other raw port belongs to an admin switch, and the
+   * panel now creates its own Railway TCP proxy the moment that switch goes on
+   * (upstream `app/railway.py` + `app/autoconfig.py`). Opening a public port in
+   * front of a listener nobody binds is the exact failure both sides refuse.
+   */
+  always?: boolean
 }
 
 /**
  * A switch the deployer flips on the panel itself after the first live poll.
  * `key` is the dotted path inside the panel's save payload
  * (`{ mtproto: { enabled: '1' } }`, `{ webproxy: { 'web-http': … } }`).
+ *
+ * The shipped panel deliberately declares **none**: its upstream pass states the
+ * rule ("a fresh deployment switches nothing on by itself") because switching a
+ * raw-port listener on with no admin in the loop publishes a port nobody asked
+ * for — and the Telegram WEB proxy in particular puts a recognisable signature
+ * on the deployment's own domain, which is how a panel ends up reachable only
+ * through a VPN. Keep the mechanism for a future panel; do not use it to
+ * pre-answer a decision the panel's own card asks the admin to make.
  */
 export interface PanelCapability {
   key: string
@@ -187,23 +219,28 @@ export const PANELS: PanelSpec[] = [
     defaultBranch: 'main',
     runtime: 'docker',
     port: 8080,
-    // Every raw-TCP capability, in the order a client should try them. On a VPS
-    // these numbers are the public ports; on Railway each one needs a TCP proxy
-    // (its public port is random), and Render publishes HTTPS only — so the
-    // list is the single source of truth both paths iterate.
-    extraPorts: [8443, 8446, 8448],
+    // Every raw-TCP listener the panel can run, in the order a client should try
+    // them — read from the panel's own catalog (`app/ports.py` upstream), so the
+    // two can never disagree about which port a capability binds. On a VPS these
+    // numbers are the public ports; on Railway each one needs a TCP proxy whose
+    // public port Railway allocates at random, and Render publishes HTTPS only —
+    // so the list is the single source of truth every path iterates.
+    //
+    // TUIC (8445) is deliberately absent: it is QUIC over UDP and a TCP proxy
+    // cannot carry it (the panel withholds it on Railway for the same reason).
+    extraPorts: [8443, 8444, 8446, 8448, 8449],
     tcpPorts: [
-      { port: 8443, label: 'Reality (مسیر مستقیم)' },
+      // The one listener with no switch: it binds in every fresh panel, so the
+      // deployer publishes it and a direct endpoint exists immediately.
+      { port: 8443, label: 'Reality (مسیر مستقیم)', always: true },
+      { port: 8444, label: 'AnyTLS' },
       { port: 8446, label: 'MTProto' },
       { port: 8448, label: 'وب‌پروکسی HTTP' },
+      { port: 8449, label: 'وب‌پروکسی SOCKS5' },
     ],
-    // The listeners behind those ports are off in a fresh panel by design; the
-    // deployer owns the decision, so it switches them on right after the panel
-    // first answers, and the published ports stop pointing at nothing.
-    capabilities: [
-      { key: 'mtproto', label: 'پروکسی MTProto' },
-      { key: 'webproxy.web-http', label: 'وب‌پروکسی HTTP' },
-    ],
+    // No `capabilities` on purpose — see the note on `PanelCapability`. The panel
+    // switches nothing on by itself, is explicit about it upstream, and creates
+    // the TCP proxy for a raw port only once its admin has enabled that port.
     hasDockerfile: true,
     dockerfilePath: 'Dockerfile',
     panelPath: '/login',
@@ -218,6 +255,7 @@ export const PANELS: PanelSpec[] = [
       engineEnabled: 'XRAY_ENABLED',
       warpEnabled: 'WARP_ENABLED',
       railwayToken: 'NEXUS_RAILWAY_TOKEN',
+      railwayProjectId: 'NEXUS_RAILWAY_PROJECT_ID',
       httpPort: 'NEXUS_HTTP_PORT',
       directHost: 'NEXUS_DIRECT_HOST',
       directPort: 'NEXUS_DIRECT_PORT',
@@ -236,9 +274,9 @@ export const PANELS: PanelSpec[] = [
     dataFile: '/data/nexus.db',
     capAdd: ['NET_ADMIN'],
     notes:
-      'رمز ادمین هنگام استقرار ساخته و یک‌بار نمایش داده می‌شود (پیش‌فرض خودِ پنل admin/admin است — همان اول عوضش کنید). دیتابیس SQLite در /data است، پس روی Railway/Render یک Volume روی /data بگذارید وگرنه با هر ری‌دیپلوی پاک می‌شود. سه پورت خام ۸۴۴۳ (Reality)، ۸۴۴۶ (MTProto) و ۸۴۴۸ (وب‌پروکسی HTTP) منتشر می‌شوند: روی VPS همین شماره‌ها عمومی‌اند و روی Railway هرکدام یک TCP Proxy با پورت تصادفی می‌گیرند که در کارت پنل نمایش داده می‌شود. سوییچ MTProto و وب‌پروکسی HTTP خودکار روشن می‌شوند. روی Render فقط پورت HTTPS منتشر می‌شود، پس این سه پورت آنجا در دسترس نیستند. CAP NET_ADMIN فقط برای خروج اختیاری WARP در compose تنظیم شده است.',
-    lastCommit: '2026-09-25',
-    verifiedAt: '2026-09-25',
+      'رمز ادمین هنگام استقرار ساخته و یک‌بار نمایش داده می‌شود (پیش‌فرض خودِ پنل admin/admin است — همان اول عوضش کنید). دیتابیس SQLite در /data است، پس روی Railway/Render یک Volume روی /data بگذارید وگرنه با هر ری‌دیپلوی پاک می‌شود. لیسنرهای خام پنل: Reality روی ۸۴۴۳ (تنها پورتی که سوییچ ندارد؛ همین یکی را ما موقع ساخت سرویس منتشر می‌کنیم)، AnyTLS روی ۸۴۴۴، MTProto روی ۸۴۴۶، وب‌پروکسی HTTP روی ۸۴۴۸ و SOCKS5 روی ۸۴۴۹. TUIC روی ۸۴۴۵ پروتکل UDP است و TCP Proxy آن را حمل نمی‌کند، پس روی Railway منتشر نمی‌شود. روی VPS همین شماره‌ها عمومی‌اند. روی Railway پنل خودش برای هر پورتی که مدیر روشن کرده یک TCP Proxy می‌سازد و پورت عمومی تصادفی‌اش را در کارت خودش نشان می‌دهد؛ به همین دلیل توکن Project و شناسهٔ پروژه (NEXUS_RAILWAY_PROJECT_ID) در متغیرهای سرویس گذاشته می‌شوند — بدون شناسهٔ پروژه این بخش کار نمی‌کند. ما هیچ سوییچی را خودمان روشن نمی‌کنیم (سیاست خودِ مخزن). روی Render فقط پورت HTTPS منتشر می‌شود، پس این سه پورت آنجا در دسترس نیستند. CAP NET_ADMIN فقط برای خروج اختیاری WARP در compose تنظیم شده است.',
+    lastCommit: '2026-09-29',
+    verifiedAt: '2026-09-29',
   },
 ]
 
@@ -333,6 +371,20 @@ export function panelRepoUrl(panel: PanelSpec): string {
 export function panelTcpPorts(panel: PanelSpec): PanelTcpPort[] {
   if (panel.tcpPorts?.length) return panel.tcpPorts
   return (panel.extraPorts ?? []).map((port) => ({ port, label: `TCP ${port}` }))
+}
+
+/**
+ * The raw-TCP ports **we** publish when we create a deployment: the ones whose
+ * listener binds with no switch to flip ({@link PanelTcpPort.always}).
+ *
+ * Everything else is the panel's own job. On Railway the panel drives the same
+ * `tcpProxyCreate` mutation itself, one proxy per capability its admin has
+ * enabled, and remembers the random public port it was given — so pre-opening
+ * those ports here would leave a public address in front of a listener that is
+ * still off, which is the failure both sides exist to prevent.
+ */
+export function panelDeployerTcpPorts(panel: PanelSpec): PanelTcpPort[] {
+  return panelTcpPorts(panel).filter((port) => port.always)
 }
 
 /** Branch the deployers build and the version check reads (`main` by default). */
@@ -527,6 +579,12 @@ export interface PanelDeploySecrets {
   secretKey: string
   /** Railway project token, created once after the project/environment exist. */
   railwayToken?: string
+  /**
+   * Railway project id. Railway injects the environment/service ids itself but
+   * never this one, and the panel's TCP-proxy pass needs it — see
+   * {@link PanelEnvNames.railwayProjectId}.
+   */
+  railwayProjectId?: string
   /** Public HTTPS origin, when the platform has generated it already. */
   publicBaseUrl?: string
   /** Direct host exposed by a VPS deployment, if the user supplied one. */
@@ -572,6 +630,10 @@ export function buildPanelDeployEnv(
     add(panel.env.httpPort, String(panel.port))
     add(panel.env.publicDomain, values.publicBaseUrl)
     add(panel.env.railwayToken, values.railwayToken, true)
+    // The panel creates its own Railway TCP proxies, and its pass refuses to run
+    // without the project id (Railway never injects it). Not secret: it is the id
+    // visible in the project's dashboard URL, and the card shows it as such.
+    add(panel.env.railwayProjectId, values.railwayProjectId)
   } else if (platform === 'render') {
     // Render injects PORT and RENDER_EXTERNAL_URL itself.
     add(panel.env.publicDomain, values.publicBaseUrl)

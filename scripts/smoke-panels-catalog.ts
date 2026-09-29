@@ -14,7 +14,7 @@
  * pins that the third-party entries stay removed (and recorded in
  * REMOVED_PANELS) unless someone decides otherwise on purpose.
  */
-import { PANELS, DEFAULT_PANEL_ID, REMOVED_PANELS, buildPanelDeployEnv, panelsForTarget, resolvePanel, panelRepoUrl, panelTcpPorts } from '../shared/panels'
+import { PANELS, DEFAULT_PANEL_ID, REMOVED_PANELS, buildPanelDeployEnv, panelsForTarget, resolvePanel, panelRepoUrl, panelDeployerTcpPorts, panelTcpPorts } from '../shared/panels'
 
 let failures = 0
 function check(label: string, ok: boolean, detail = '') {
@@ -91,15 +91,33 @@ check('Mizetusi → هر سه هدف', ['railway', 'render', 'vps'].every((t) =>
 check('Mizetusi → رمز ادمین و کلید سشن', miz.env.adminPassword === 'ADMIN_PASSWORD' && miz.env.secretKey === 'JWT_SECRET')
 check('Mizetusi → دیتای ماندگار روی /data', miz.dataVolume === '/data')
 check('Mizetusi → پورت TCP ریلیتی', miz.extraPorts?.includes(8443) === true)
-check('Mizetusi → پورت MTProto و HTTP هم فعال', miz.extraPorts?.includes(8446) === true && miz.extraPorts?.includes(8448) === true)
+// The panel's own catalog (`app/ports.py` upstream) is the list this has to
+// match: Reality 8443, AnyTLS 8444, MTProto 8446, web proxies 8448/8449.
 check(
-  'Mizetusi → هر سه پورت پروکسی می‌گیرند',
-  [8443, 8446, 8448].every((p) => (panelTcpPorts(miz) ?? []).some((t) => t.port === p)),
-  JSON.stringify(panelTcpPorts(miz)),
+  'Mizetusi → همهٔ لیسنرهای خام پنل',
+  [8443, 8444, 8446, 8448, 8449].every((p) => miz.extraPorts?.includes(p) === true),
+  JSON.stringify(miz.extraPorts),
 )
 check(
-  'Mizetusi → قابلیت‌های MTProto و WebProxy روشن می‌شوند',
-  ['mtproto', 'webproxy.web-http'].every((k) => (miz.capabilities ?? []).some((c) => c.key === k)),
+  'Mizetusi → TUIC (UDP) منتشر نمی‌شود',
+  miz.extraPorts?.includes(8445) !== true,
+  JSON.stringify(miz.extraPorts),
+)
+check(
+  'Mizetusi → هر لیسنر یک ورودی TCP دارد',
+  [8443, 8444, 8446, 8448, 8449].every((p) => (panelTcpPorts(miz) ?? []).some((t) => t.port === p)),
+  JSON.stringify(panelTcpPorts(miz)),
+)
+// Publishing a port whose listener the panel has not switched on is the dead
+// link both sides refuse, so we only ever open the one with no switch.
+check(
+  'Mizetusi → فقط پورت مستقیم را خودمان منتشر می‌کنیم',
+  panelDeployerTcpPorts(miz).length === 1 && panelDeployerTcpPorts(miz)[0]?.port === 8443,
+  JSON.stringify(panelDeployerTcpPorts(miz)),
+)
+check(
+  'Mizetusi → هیچ سوییچی خودکار روشن نمی‌شود',
+  (miz.capabilities ?? []).length === 0,
   JSON.stringify(miz.capabilities),
 )
 check('Mizetusi → بدون نیاز به نصب xray روی هاست', miz.needsXray === false)
@@ -108,12 +126,13 @@ const railwayManifest = buildPanelDeployEnv(miz, 'railway', {
   adminPassword: 'admin-secret',
   secretKey: 'jwt-secret',
   railwayToken: 'project-secret',
+  railwayProjectId: 'prj-catalog',
   publicBaseUrl: 'https://panel.up.railway.app',
 })
 const railwayNames = railwayManifest.map((item) => item.name)
 check(
   'Mizetusi → مانیفست کامل Railway',
-  ['ADMIN_PASSWORD', 'JWT_SECRET', 'SQLITE_PATH', 'NEXUS_PLATFORM', 'XRAY_ENABLED', 'WARP_ENABLED', 'PORT', 'NEXUS_HTTP_PORT', 'PUBLIC_BASE_URL', 'NEXUS_RAILWAY_TOKEN'].every((name) => railwayNames.includes(name)),
+  ['ADMIN_PASSWORD', 'JWT_SECRET', 'SQLITE_PATH', 'NEXUS_PLATFORM', 'XRAY_ENABLED', 'WARP_ENABLED', 'PORT', 'NEXUS_HTTP_PORT', 'PUBLIC_BASE_URL', 'NEXUS_RAILWAY_TOKEN', 'NEXUS_RAILWAY_PROJECT_ID'].every((name) => railwayNames.includes(name)),
   railwayNames.join(','),
 )
 check(
