@@ -42,6 +42,8 @@ export interface Deployment {
   custom_domain: string | null
   kv_namespace_id: string | null
   panel_url: string | null
+  /** Ready-to-use subscription link for this source (empty when it has none). */
+  sub_url: string | null
   method: 'workers' | 'pages'
   cf_account_id: string | null
   created_at: string

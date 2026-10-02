@@ -113,6 +113,7 @@ const SCHEMA_STATEMENTS = [
     custom_domain TEXT,
     kv_namespace_id TEXT,
     panel_url TEXT,
+    sub_url TEXT,
     method TEXT NOT NULL DEFAULT 'workers' CHECK (method IN ('workers','pages')),
     worker_source TEXT NOT NULL DEFAULT 'edgetunnel',
     cf_account_id TEXT,
@@ -267,6 +268,9 @@ const MIGRATIONS = [
   `ALTER TABLE sub_groups ADD COLUMN format TEXT NOT NULL DEFAULT 'base64'`,
   `ALTER TABLE sub_groups ADD COLUMN extra_links TEXT NOT NULL DEFAULT '[]'`,
   `ALTER TABLE deployments ADD COLUMN cf_token_row_id TEXT`,
+  // Source-specific subscription link (see worker/deploy.ts). Added after the
+  // first Cloudflare deploys, so older rows need the column too.
+  `ALTER TABLE deployments ADD COLUMN sub_url TEXT`,
   `ALTER TABLE worker_members ADD COLUMN request_quota INTEGER`,
   `ALTER TABLE worker_members ADD COLUMN used_requests INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE worker_members ADD COLUMN ip_limit INTEGER`,

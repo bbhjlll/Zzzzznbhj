@@ -2,6 +2,25 @@ import type { Env } from './env'
 
 // ── Small helpers ──────────────────────────────────────────────────────────
 
+/**
+ * The double-MD5 token edgetunnel uses for its `/sub?token=` link.
+ *
+ * edgetunnel (cmliu) computes `MD5MD5(host + userID)` where `MD5MD5` hashes
+ * once, takes the hex substring `[7,27)` and hashes that again. It also folds
+ * the token to lowercase. Reproducing it here is what lets the panel hand the
+ * user a sub link that actually returns nodes instead of the origin 404 page
+ * (the `/sub` path without a valid `token` falls through to the upstream).
+ */
+export async function md5Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('MD5', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+export async function edgetunnelSubToken(host: string, userId: string): Promise<string> {
+  const first = await md5Hex(host + userId)
+  return (await md5Hex(first.slice(7, 27))).toLowerCase()
+}
+
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,

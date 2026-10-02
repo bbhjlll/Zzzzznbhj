@@ -422,8 +422,40 @@ async function handleRailwayStatus(env: Env, userId: string, url: URL): Promise<
 
 // ── Deployments ────────────────────────────────────────────────────────────
 
+/**
+ * Shape a `deployments` row for the API.
+ *
+ * `sub_url` is computed on the fly when it is missing, so deployments created
+ * before the source-specific link was stored still get a working sub link
+ * instead of the UI guessing a path that 404s. The value persisted at deploy
+ * time always wins when present.
+ */
 function parseDeploymentRow(row: Record<string, unknown>): Record<string, unknown> {
-  return { ...row, config: safeJsonParse(row.config as string, {}) }
+  const config = safeJsonParse<Record<string, unknown>>(row.config as string, {})
+  return {
+    ...row,
+    config,
+    sub_url: row.sub_url ?? deploymentSubUrl({
+      workerUrl: row.worker_url as string | null,
+      uuid: row.uuid as string | null,
+      source: String(row.worker_source ?? config.worker_source ?? 'edgetunnel'),
+    }),
+  }
+}
+
+/**
+ * The subscription link for a Cloudflare worker deployment, derived from its
+ * source when the stored value is absent. Mirrors the logic in
+ * `worker/deploy.ts` (which runs at deploy time and also needs an md5 token,
+ * so it cannot be reproduced here) for the sources whose link is a plain URL:
+ * CFnew/NEXUS serve it under the UUID path, zeus has none until a user exists.
+ */
+function deploymentSubUrl(input: { workerUrl: string | null; uuid: string | null; source: string }): string | null {
+  const base = input.workerUrl?.replace(/\/+$/, '')
+  if (!base || !input.uuid) return null
+  if (input.source === 'miliconfigzeus') return null
+  if (input.source === 'edgetunnel' || input.source === 'edgetunnel_kv') return null
+  return `${base}/${input.uuid}/sub`
 }
 
 async function listDeployments(env: Env, userId: string, url: URL): Promise<Response> {

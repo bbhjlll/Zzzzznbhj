@@ -1,5 +1,5 @@
 import type { Env } from './env'
-import { nowIso, genId } from './util'
+import { nowIso, genId, edgetunnelSubToken } from './util'
 import { notifyDeployment } from './telegram'
 
 // ── Ported 1:1 from the original cf-deploy function (Supabase → D1) ────────
@@ -17,9 +17,21 @@ interface WorkerSourceConfig {
   configFormat: 'edgetunnel' | 'custom'
   uuidEnvName: string
   fallbackUrls?: string[]
-  /** 'kv' (default): edgetunnel-style KV worker. 'zeus': full D1 panel.
-   *  'nexus': next-gen KV worker (internal smart panel + live map). */
-  kind?: 'kv' | 'zeus' | 'nexus'
+  /**
+   * Which routing model the worker implements — this is what decides the
+   * panel path and the subscription link, so the two can never be guessed
+   * wrong again:
+   *
+   *  - `edgetunnel` (cmliu): the dashboard lives at a FIXED `/admin` (or
+   *    `/login`), and the subscription is `/sub?token=<md5(host+uuid)>`.
+   *  - `custom` / `nexus` (CFnew): the dashboard and the subscription are both
+   *    served under the UUID path — `/<uuid>` is the panel, `/<uuid>/sub` the
+   *    raw sub link. There is no `/sub` at the worker root.
+   *  - `zeus`: the whole worker is a D1-backed panel; a user's subscription is
+   *    `/sub/<username>`, which only exists after an account is created in the
+   *    panel — there is no deploy-time sub link at all.
+   */
+  kind: 'edgetunnel' | 'custom' | 'nexus' | 'zeus'
 }
 
 const WORKER_SOURCES: Record<string, WorkerSourceConfig> = {
@@ -31,6 +43,7 @@ const WORKER_SOURCES: Record<string, WorkerSourceConfig> = {
     configKey: 'config.json',
     configFormat: 'edgetunnel',
     uuidEnvName: 'UUID',
+    kind: 'edgetunnel',
   },
   edgetunnel_kv: {
     url: 'https://raw.githubusercontent.com/cmliu/edgetunnel/main/_worker.js',
@@ -40,6 +53,7 @@ const WORKER_SOURCES: Record<string, WorkerSourceConfig> = {
     configKey: 'config.json',
     configFormat: 'edgetunnel',
     uuidEnvName: 'UUID',
+    kind: 'edgetunnel',
   },
   custom: {
     url: 'https://raw.githubusercontent.com/Alibakhshi-qr/miliconfig-pro/main/public/repo/worker-source.js',
@@ -49,9 +63,13 @@ const WORKER_SOURCES: Record<string, WorkerSourceConfig> = {
     configKey: 'c',
     configFormat: 'custom',
     uuidEnvName: 'u',
+    // The public mirrors of this (private-repo) source 404, so the copy
+    // bundled with the panel is always tried as the fallback.
     fallbackUrls: [
       'https://raw.githubusercontent.com/miladjahani/miliconfigpro-v1/main/public/repo/worker-source.js',
+      '/repo/worker-source.js',
     ],
+    kind: 'custom',
   },
   nexus: {
     url: 'https://raw.githubusercontent.com/miladjahani/miliconfigpro-v1/main/public/repo/nexus.js',
@@ -61,8 +79,11 @@ const WORKER_SOURCES: Record<string, WorkerSourceConfig> = {
     configKey: 'c',
     configFormat: 'custom',
     uuidEnvName: 'u',
+    // The repo is private, so every raw mirror 404s. Without the bundled copy
+    // as a fallback the deploy dies with "failed to fetch worker source".
     fallbackUrls: [
       'https://raw.githubusercontent.com/Alibakhshi-qr/miliconfig-pro/main/public/repo/nexus.js',
+      '/repo/nexus.js',
     ],
     kind: 'nexus',
   },
@@ -238,12 +259,13 @@ export async function runDeployment(env: Env, job: DeployJob): Promise<void> {
     let workerCode = ''
     // Primary URL first; if unavailable (e.g. repo moved/renamed), fall back to
     // the copy bundled with this panel so the default source can never 404.
-    const fallbackUrls = [
-      ...(sourceConfig.fallbackUrls ?? []),
-      // The bundled copy is the custom (CFnew) worker only — never fall a
-      // different source (e.g. NEXUS) over to a foreign worker silently.
-      ...(worker_source === 'custom' ? [`${job.origin}/repo/worker-source.js`] : []),
-    ]
+    // Fallbacks may be absolute (a mirror) or panel-relative (the copy bundled
+    // in `public/repo/`, e.g. `/repo/nexus.js`). Relative ones are resolved
+    // against this installation's own origin — the repo is private, so the raw
+    // mirrors 404 and the bundled copy is the only one that works.
+    const fallbackUrls = (sourceConfig.fallbackUrls ?? []).map((u) =>
+      /^https?:\/\//i.test(u) ? u : `${job.origin.replace(/\/$/, '')}${u.startsWith('/') ? u : `/${u}`}`,
+    )
     for (const [i, url] of [sourceConfig.url, ...fallbackUrls].entries()) {
       try {
         const resp = await fetch(url)
@@ -623,13 +645,55 @@ export async function runDeployment(env: Env, job: DeployJob): Promise<void> {
       })
     }
 
-    const panelUrl = panelKey ? `${workerUrl}/${panelKey}` : workerUrl
+    // ── Build the links the UI shows ────────────────────────────────────
+    //
+    // These differ per source and were previously computed from one wrong
+    // guess: a fixed `/admin` (edgetunnel) or `/<uuid>` (CFnew) for EVERY
+    // worker. That produced a 403 "UUID wrong" page for edgetunnel, a 404 for
+    // zeus (`/<uuid>` does not exist there) and a `/sub` link that returned
+    // the origin's 404 page. Each source is now spelled out exactly.
+    const base = workerUrl.replace(/\/+$/, '')
+    const customPath = (custom_path ?? '').trim()
+    let panelUrl: string
+    let subUrl: string
+    if (sourceConfig.kind === 'edgetunnel') {
+      // The dashboard is fixed at /admin (redirects to /login until the admin
+      // password is entered); it never moves with a custom path.
+      panelUrl = `${base}/admin`
+      // The sub link needs the same md5(host+uuid) token the worker checks,
+      // otherwise /sub falls through to the upstream 404 page.
+      let token = ''
+      try { token = await edgetunnelSubToken(new URL(base).host, uuid) } catch { /* best effort */ }
+      subUrl = token ? `${base}/sub?token=${token}` : `${base}/sub`
+    } else if (sourceConfig.kind === 'zeus') {
+      // The whole worker is the panel. A subscription only exists after an
+      // account is created inside it (`/sub/<username>`), so there is no
+      // deploy-time sub link to show.
+      panelUrl = base
+      subUrl = ''
+    } else {
+      // CFnew-style workers (custom + NEXUS): the UUID path IS the dashboard
+      // and its sub link — there is nothing at `/sub` on the root. When the
+      // user set a custom path (`d`), the UUID path is disabled and the
+      // dashboard/sub live under that path instead.
+      const custom = customPath.replace(/^\/+|\/+$/g, '')
+      if (custom) {
+        panelUrl = `${base}/${custom}`
+        subUrl = `${base}/${custom}/sub`
+      } else {
+        panelUrl = `${base}/${uuid}`
+        subUrl = `${base}/${uuid}/sub`
+      }
+    }
     await appendLog(env, deployment_id, `✓ panel URL: ${panelUrl}`)
+    if (subUrl) await appendLog(env, deployment_id, `✓ sub URL: ${subUrl}`)
+    else await appendLog(env, deployment_id, 'ℹ این پنل لینک ساب آماده ندارد — داخل پنل کاربر بسازید')
     await appendLog(env, deployment_id, '✓ deployment complete!')
 
     await updateDeployment(env, deployment_id, 'deployed', {
       worker_url: workerUrl,
       panel_url: panelUrl,
+      sub_url: subUrl || null,
       kv_namespace_id: kvNamespaceId,
       cf_account_id: accountId,
       route: null,

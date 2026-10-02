@@ -36,6 +36,10 @@ interface BackupGroup {
   inject?: number
   ips?: string[]
   proxies?: unknown[]
+  /** Output format of the served subscription (base64/clash/singbox/plain). */
+  format?: string
+  /** Extra hand-pasted node links merged into the group — must survive a backup. */
+  extra_links?: string[]
 }
 
 export async function exportBackup(env: Env, userId: string): Promise<Response> {
@@ -96,6 +100,8 @@ export async function exportBackup(env: Env, userId: string): Promise<Response> 
         inject: g.inject as number | undefined,
         ips: safeArr(g.ips as string),
         proxies: safeArr(g.proxies as string),
+        format: (g.format as string | null) ?? 'base64',
+        extra_links: safeArr(g.extra_links as string) as string[],
       }
     }) as BackupGroup[],
   }
@@ -175,10 +181,11 @@ export async function importBackup(env: Env, userId: string, request: Request): 
     const exists = await env.DB.prepare(`SELECT 1 FROM sub_groups WHERE sub_token = ?`).bind(g.sub_token).first()
     if (exists) { skippedGroups++; continue }
     await env.DB.prepare(
-      `INSERT INTO sub_groups (id, user_id, name, deployment_ids, sub_token, inject, ips, proxies, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6, 0), COALESCE(?7, '[]'), COALESCE(?8, '[]'), ?9)`
+      `INSERT INTO sub_groups (id, user_id, name, deployment_ids, sub_token, inject, ips, proxies, format, extra_links, created_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6, 0), COALESCE(?7, '[]'), COALESCE(?8, '[]'), COALESCE(?9, 'base64'), COALESCE(?10, '[]'), ?11)`
     ).bind(crypto.randomUUID().replaceAll('-', ''), userId, g.name, JSON.stringify(ids), g.sub_token,
-      g.inject ?? 0, JSON.stringify(g.ips ?? []), JSON.stringify(g.proxies ?? []), nowIso()).run()
+      g.inject ?? 0, JSON.stringify(g.ips ?? []), JSON.stringify(g.proxies ?? []),
+      g.format ?? null, g.extra_links ? JSON.stringify(g.extra_links) : null, nowIso()).run()
     addedGroups++
   }
 

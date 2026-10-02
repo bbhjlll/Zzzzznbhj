@@ -69,6 +69,8 @@ export async function serveStatusPage(env: Env, token: string, origin: string): 
 
   let body: string
   if (!m) {
+    // An unknown/invalid status token is a real 404 — returning 200 would make
+    // crawlers and clients treat a dead link as a valid page.
     body = `<div class="card"><h1>❌ یافت نشد</h1><p class="muted">این لینک وضعیت معتبر نیست.</p></div>`
   } else {
     const enabled = m.enabled === 1
@@ -145,7 +147,10 @@ h1{font-size:1.25rem;margin-bottom:18px;color:#f8fafc}
 small{display:block;margin-top:6px;font-size:.75rem}
 </style></head><body>${body}</body></html>`
 
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } })
+  return new Response(html, {
+    status: m ? 200 : 404,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+  })
 }
 
 function safeArr(v: unknown): string[] {

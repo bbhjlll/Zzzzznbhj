@@ -425,7 +425,7 @@ function WorkersTab() {
                   )}
                 </div>
 
-                {dep.panel_url && (
+                {dep.sub_url ? (
                   <div>
                     <div className="flex items-center gap-2 mb-2">
                       <Smartphone className="w-3.5 h-3.5 text-brand-400" />
@@ -433,7 +433,8 @@ function WorkersTab() {
                     </div>
                     <div className="flex flex-wrap gap-2 mb-2">
                       {SUB_TARGETS.map((t) => {
-                        const url = `${dep.panel_url}/sub?target=${t.key}`
+                        const sep = dep.sub_url!.includes('?') ? '&' : '?'
+                        const url = `${dep.sub_url}${sep}target=${t.key}`
                         const key = `${dep.id}-${t.key}`
                         return (
                           <button key={t.key} onClick={() => copySub(url, key)} title={url}
@@ -445,8 +446,8 @@ function WorkersTab() {
                       })}
                     </div>
                     <div className="flex items-center gap-2 bg-slate-900/40 rounded-lg px-3 py-2">
-                      <code className="text-xs text-slate-500 truncate flex-1 font-mono" dir="ltr">{dep.panel_url}/sub</code>
-                      <button onClick={() => copySub(`${dep.panel_url}/sub`, `${dep.id}-base`)}>
+                      <code className="text-xs text-slate-500 truncate flex-1 font-mono" dir="ltr">{dep.sub_url}</code>
+                      <button onClick={() => copySub(dep.sub_url!, `${dep.id}-base`)}>
                         {copiedSub === `${dep.id}-base` ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5 text-slate-500 hover:text-brand-400" />}
                       </button>
                     </div>
@@ -454,6 +455,10 @@ function WorkersTab() {
                       هر بار که تنظیمات را ذخیره می‌کنی، ورکر ظرف ۳۰ ثانیه تنظیمات جدید را از KV می‌خواند و ساب‌لینک‌ها به‌روز می‌شوند.
                     </p>
                   </div>
+                ) : dep.status === 'deployed' && (
+                  <p className="text-[11px] text-slate-500">
+                    این سورس لینک ساب آماده ندارد — کاربر/کانفیگ را داخل خود پنل بسازید و از لینک ساب آن استفاده کنید.
+                  </p>
                 )}
 
                 {dep.panel_url && (

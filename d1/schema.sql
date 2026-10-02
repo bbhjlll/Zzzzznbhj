@@ -127,6 +127,10 @@ CREATE TABLE IF NOT EXISTS deployments (
   custom_domain TEXT,
   kv_namespace_id TEXT,
   panel_url TEXT,
+  -- Ready-to-use subscription link (source-specific: edgetunnel's /sub?token=…,
+  -- CFnew's /<uuid>/sub, empty for zeus). Computed at deploy time so the UI
+  -- never has to guess a path that may 404.
+  sub_url TEXT,
   method TEXT NOT NULL DEFAULT 'workers' CHECK (method IN ('workers','pages')),
   worker_source TEXT NOT NULL DEFAULT 'edgetunnel',
   cf_account_id TEXT,
