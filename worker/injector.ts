@@ -1,6 +1,7 @@
 import type { Env } from './env'
 import { apiError, genId, json, nowIso, safeJsonParse } from './util'
 import { applyInjection, buildSubBase64, collectNodeLines, type PreferredIP, type ProxySpec } from './inject'
+import { applyEch, applyFragment, type EchConfig, type FragmentConfig } from './nodetls'
 import { renderSubscription } from './formats'
 import { expandRanges } from './net'
 import { rotate } from './rotation'
@@ -15,6 +16,38 @@ interface InjectorBody {
   ips?: PreferredIP[]
   proxies?: ProxySpec[]
   rotate_minutes?: number | null
+  /** ECH — encrypts the client SNI itself (strongest anti-censorship trick). */
+  ech?: boolean
+  ech_sni?: string
+  ech_dns?: string
+  /** TLS fragmentation / cipher masking for the nodes of this sub. */
+  fragment?: FragmentConfig
+}
+
+/** Defaults that work with the ECH endpoints Cloudflare publishes. */
+const DEFAULT_ECH_SNI = 'cloudflare-ech.com'
+const DEFAULT_ECH_DNS = 'https://dns.alidns.com/dns-query'
+
+function cleanText(v: unknown, max: number): string {
+  return String(v ?? '').trim().slice(0, max)
+}
+
+function readEch(row: { ech?: number | null; ech_sni?: string | null; ech_dns?: string | null }): EchConfig {
+  return {
+    enabled: !!row.ech,
+    sni: cleanText(row.ech_sni, 120) || DEFAULT_ECH_SNI,
+    dns: cleanText(row.ech_dns, 200) || DEFAULT_ECH_DNS,
+  }
+}
+
+function readFragment(raw: unknown): FragmentConfig {
+  const f = safeJsonParse<FragmentConfig>(typeof raw === 'string' ? raw : '', { enabled: false })
+  return {
+    enabled: !!f.enabled,
+    fm: cleanText(f.fm, 2000) || undefined,
+    cs: cleanText(f.cs, 2000) || undefined,
+    preset: cleanText(f.preset, 60) || undefined,
+  }
 }
 
 function sanitizeIps(ips?: PreferredIP[]): PreferredIP[] {
@@ -69,17 +102,24 @@ export async function handleInjectorCreate(env: Env, userId: string, request: Re
   const id = genId()
   const subToken = genId().replace(/-/g, '')
   const rotateMinutes = body.rotate_minutes != null && body.rotate_minutes > 0 ? Math.round(body.rotate_minutes) : null
+  const ech = readEch({
+    ech: body.ech ? 1 : 0,
+    ech_sni: cleanText(body.ech_sni, 120) || DEFAULT_ECH_SNI,
+    ech_dns: cleanText(body.ech_dns, 200) || DEFAULT_ECH_DNS,
+  })
+  const fragment = readFragment(body.fragment)
   await env.DB.prepare(
-    `INSERT INTO injector_jobs (id, user_id, name, source, ips, proxies, sub_token, rotate_minutes, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(id, userId, name, source.slice(0, 100_000), JSON.stringify(ips), JSON.stringify(proxies), subToken, rotateMinutes, nowIso(), nowIso()).run()
+    `INSERT INTO injector_jobs (id, user_id, name, source, ips, proxies, sub_token, rotate_minutes, ech, ech_sni, ech_dns, fragment, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, userId, name, source.slice(0, 100_000), JSON.stringify(ips), JSON.stringify(proxies), subToken, rotateMinutes,
+    ech.enabled ? 1 : 0, ech.sni, ech.dns, JSON.stringify(fragment), nowIso(), nowIso()).run()
 
   return json({ data: { id, sub_token: subToken } }, 201)
 }
 
 export async function handleInjectorList(env: Env, userId: string): Promise<Response> {
   const r = await env.DB.prepare(
-    'SELECT id, name, ips, proxies, sub_token, rotate_minutes, created_at FROM injector_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+    'SELECT id, name, ips, proxies, sub_token, rotate_minutes, ech, ech_sni, ech_dns, fragment, created_at FROM injector_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
   ).bind(userId).all()
   return json({
     data: r.results.map((row) => ({
@@ -87,6 +127,8 @@ export async function handleInjectorList(env: Env, userId: string): Promise<Resp
       ips: safeJsonParse(row.ips as string, []),
       proxies: safeJsonParse(row.proxies as string, []),
       rotate_minutes: row.rotate_minutes ?? null,
+      ech: readEch(row as { ech: number | null; ech_sni: string | null; ech_dns: string | null }),
+      fragment: readFragment(row.fragment),
     })),
   })
 }
@@ -100,9 +142,9 @@ export async function handleInjectorDelete(env: Env, userId: string, id: string)
 /** Update an injected sub's preferred IPs (e.g. push fresh scan results). */
 export async function handleInjectorPatch(env: Env, userId: string, id: string, request: Request): Promise<Response> {
   const body = safeJsonParse<InjectorBody>(await request.text().catch(() => ''), {})
-  const existing = await env.DB.prepare('SELECT id, ips, proxies, rotate_minutes FROM injector_jobs WHERE id = ? AND user_id = ?')
+  const existing = await env.DB.prepare('SELECT id, ips, proxies, rotate_minutes, ech, ech_sni, ech_dns, fragment FROM injector_jobs WHERE id = ? AND user_id = ?')
     .bind(id, userId)
-    .first<{ id: string; ips: string; proxies: string; rotate_minutes: number | null }>()
+    .first<{ id: string; ips: string; proxies: string; rotate_minutes: number | null; ech: number | null; ech_sni: string | null; ech_dns: string | null; fragment: string | null }>()
   if (!existing) return apiError('پیدا نشد', 404)
 
   const ips = body.ips !== undefined ? sanitizeIps(body.ips) : safeJsonParse<PreferredIP[]>(existing.ips, [])
@@ -113,21 +155,30 @@ export async function handleInjectorPatch(env: Env, userId: string, id: string, 
     ? (body.rotate_minutes == null || body.rotate_minutes <= 0 ? null : Math.round(body.rotate_minutes))
     : (existing.rotate_minutes ?? null)
 
-  await env.DB.prepare('UPDATE injector_jobs SET ips = ?, proxies = ?, rotate_minutes = ?, updated_at = ? WHERE id = ?')
-    .bind(JSON.stringify(ips), JSON.stringify(proxies), rotateMinutes, nowIso(), id)
+  const ech = body.ech !== undefined
+    ? readEch({ ech: body.ech ? 1 : 0, ech_sni: body.ech_sni ?? existing.ech_sni, ech_dns: body.ech_dns ?? existing.ech_dns })
+    : readEch(existing)
+  const fragment = body.fragment !== undefined ? readFragment(body.fragment) : readFragment(existing.fragment)
+
+  await env.DB.prepare('UPDATE injector_jobs SET ips = ?, proxies = ?, rotate_minutes = ?, ech = ?, ech_sni = ?, ech_dns = ?, fragment = ?, updated_at = ? WHERE id = ?')
+    .bind(JSON.stringify(ips), JSON.stringify(proxies), rotateMinutes, ech.enabled ? 1 : 0, ech.sni, ech.dns, JSON.stringify(fragment), nowIso(), id)
     .run()
-  return json({ data: { id, ips, proxies } })
+  return json({ data: { id, ips, proxies, ech, fragment } })
 }
 
 /** Public endpoint — GET /api/sub/inject/:token[?target=clash] */
 export async function serveInjectedSub(env: Env, token: string, target: string | null): Promise<Response> {
-  const row = await env.DB.prepare('SELECT source, ips, proxies, rotate_minutes FROM injector_jobs WHERE sub_token = ?')
+  const row = await env.DB.prepare('SELECT source, ips, proxies, rotate_minutes, ech, ech_sni, ech_dns, fragment FROM injector_jobs WHERE sub_token = ?')
     .bind(token)
-    .first<{ source: string; ips: string; proxies: string; rotate_minutes: number | null }>()
+    .first<{ source: string; ips: string; proxies: string; rotate_minutes: number | null; ech: number | null; ech_sni: string | null; ech_dns: string | null; fragment: string | null }>()
   if (!row) return new Response('یافت نشد', { status: 404 })
 
   try {
-    const lines = await collectNodeLines(row.source)
+    const source = await collectNodeLines(row.source)
+    // Anti-censorship first, so the injected variants inherit ECH + fragmentation
+    // too. (Share-link formats only: sing-box JSON needs a real ECHConfigList
+    // and has no fragment field, so `?target=singbox` deliberately drops them.)
+    const lines = applyFragment(applyEch(source, readEch(row)), readFragment(row.fragment))
     const rotatedIps = rotate(safeJsonParse<PreferredIP[]>(row.ips, []), row.rotate_minutes)
     const result = applyInjection(lines, rotatedIps, safeJsonParse<ProxySpec[]>(row.proxies, []))
     return renderSubscription(result.subLines, target)

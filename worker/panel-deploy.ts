@@ -9,6 +9,7 @@
 
 import type { Env } from './env'
 import { genId, nowIso } from './util'
+import { generateAdminPassword, generateSecretKey, uniqueName } from './identity'
 import { DEFAULT_RAILWAY_REGION, panelBranch, resolvePanel, resolveRailwayRegion, type PanelCapability, type PanelSpec } from '../shared/panels'
 import { deployToRailway, latestRailwayServiceDeployment, RailwayApiError, railwayDeployStatus, railwayRedeploy, updateRailwayPanel, updateRailwayServiceSettings } from './railway'
 import { deployToRender, RenderApiError, renderDeployStatus, renderRedeploy } from './render'
@@ -38,7 +39,11 @@ export type StartPanelDeployResult =
       projectId?: string
       /** Render only — needed to poll the deploy status. */
       serviceId?: string
+      /** The unique project/service name this deployment actually got. */
+      projectName: string
+      /** Empty for panels that do not read an admin-password env var. */
       adminUsername: string
+      /** Empty for panels that do not read an admin-password env var. */
       adminPassword: string
       /** Railway may already return the generated *.up.railway.app domain. */
       domain: string | null
@@ -82,9 +87,20 @@ export async function startPanelDeploy(env: Env, input: StartPanelDeployInput): 
 
   const token = (rail ?? render)!.token
   const tokenId = (rail ?? render)!.id
-  const adminUsername = 'admin'
-  const adminPassword = input.panel.defaultAdminPassword ?? `mil${genId().replaceAll('-', '')}`.slice(0, 14)
-  const secretKey = genId()
+
+  // ── Unique, secret identity for THIS deployment ─────────────────────────
+  // No setting is shared with another deployment of the same panel:
+  //   • the project/service name is made unique inside the user's account;
+  //   • the admin password is always freshly generated — the panel's published
+  //     default (e.g. `pxpanel2026`) is never reused, because it would make
+  //     every install of that panel identical and open all of them at once;
+  //   • the session/signing key is a new 256-bit value.
+  // Panels that do not read an admin password / secret key env var get no
+  // pretend credentials (empty strings), so nothing fake is ever shown.
+  const projectName = await uniqueDeployName(env, input.userId, name)
+  const adminUsername = input.panel.env.adminPassword ? 'admin' : ''
+  const adminPassword = input.panel.env.adminPassword ? generateAdminPassword() : ''
+  const secretKey = input.panel.env.secretKey ? generateSecretKey() : ''
 
   try {
     if (platform === 'railway') {
@@ -135,6 +151,7 @@ export async function startPanelDeploy(env: Env, input: StartPanelDeployInput): 
         ok: true,
         platform,
         id: result.deploymentId,
+        projectName: name,
         projectId: result.projectId,
         adminUsername,
         adminPassword,
@@ -144,18 +161,38 @@ export async function startPanelDeploy(env: Env, input: StartPanelDeployInput): 
       }
     }
 
-    const result = await deployToRender(token, name, input.panel, { adminPassword, secretKey })
+    const result = await deployToRender(token, projectName, input.panel, { adminPassword, secretKey })
     await env.DB.prepare(
       `INSERT INTO render_deploys (id, user_id, token_id, service_id, name, panel, admin_username, admin_password, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(result.deployId, input.userId, tokenId, result.serviceId, name, input.panel.id, adminUsername, adminPassword, nowIso()).run()
+    ).bind(result.deployId, input.userId, tokenId, result.serviceId, projectName, input.panel.id, adminUsername, adminPassword, nowIso()).run()
     await env.DB.prepare('UPDATE render_tokens SET last_used_at = ? WHERE id = ?').bind(nowIso(), tokenId).run()
-    await logStarted(env, input.userId, 'render', name)
-    return { ok: true, platform, id: result.deployId, serviceId: result.serviceId, adminUsername, adminPassword, domain: null, dashboardUrl: result.dashboardUrl }
+    await logStarted(env, input.userId, 'render', projectName)
+    return { ok: true, platform, id: result.deployId, serviceId: result.serviceId, projectName, adminUsername, adminPassword, domain: null, dashboardUrl: result.dashboardUrl }
   } catch (err) {
     const msg = err instanceof RailwayApiError || err instanceof RenderApiError ? err.message : err instanceof Error ? err.message : 'خطا در استقرار پنل'
     return { ok: false, error: msg }
   }
+}
+
+/**
+ * A project/service name no other deployment of this user already holds.
+ * Identifiers are deliberately per-account unique so every deployment keeps its
+ * own identity instead of colliding with (or shadowing) an older one.
+ */
+async function uniqueDeployName(env: Env, userId: string, base: string): Promise<string> {
+  const rows = await env.DB.prepare(
+    `SELECT name FROM railway_deploys WHERE user_id = ?
+     UNION ALL
+     SELECT name FROM render_deploys WHERE user_id = ?`,
+  )
+    .bind(userId, userId)
+    .all<{ name: string | null }>()
+    .catch(() => null)
+  const taken = new Set(
+    (rows?.results ?? []).map((r) => (r.name ?? '').toLowerCase()).filter(Boolean),
+  )
+  return uniqueName(base, (candidate) => taken.has(candidate))
 }
 
 async function logStarted(env: Env, userId: string, platform: PanelPlatform, name: string): Promise<void> {

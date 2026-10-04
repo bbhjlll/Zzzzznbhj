@@ -20,7 +20,7 @@ import {
 import JSZip from 'jszip'
 import { generateDockerCompose, generateNginxConf, generateEnvFile, generateDeployScript, generateRailwayEnvFile, generateRailwayReadme } from '../lib/vps-deploy'
 import type { CFToken, RailwayToken, RenderToken } from '../lib/types'
-import { DEFAULT_RAILWAY_REGION, PANELS, railwayRegionLabel } from '../../shared/panels'
+import { DEFAULT_RAILWAY_REGION, PANELS, RAILWAY_REGIONS, railwayRegionLabel } from '../../shared/panels'
 
 /**
  * The panel this wizard installs. The catalog ships a single, first-party panel
@@ -82,6 +82,9 @@ export default function DeployWizard() {
     setWorkerSource(m === 'vps' || m === 'railway' || m === 'render' ? PANEL.id : 'edgetunnel')
   }
   const [railProjectUrl, setRailProjectUrl] = useState<string | null>(null)
+  // Region (and therefore the deploy target) is chosen per deployment instead of
+  // being hardcoded, so consecutive installs don't all land in the same place.
+  const [railRegion, setRailRegion] = useState(DEFAULT_RAILWAY_REGION)
   const [newRailName, setNewRailName] = useState('railway-main')
   const [newRailToken, setNewRailToken] = useState('')
   const [railSaving, setRailSaving] = useState(false)
@@ -404,7 +407,7 @@ export default function DeployWizard() {
       try {
         const { data } = await api<{ data: { deploymentId: string; projectId: string; projectUrl: string; domain?: string; admin_username?: string; admin_password?: string; region?: string; region_label?: string } }>('/railway/deploy', {
           method: 'POST',
-          body: { token_id: rt.id, name, region: DEFAULT_RAILWAY_REGION, panel: PANEL.id },
+          body: { token_id: rt.id, name, region: railRegion, panel: PANEL.id },
         })
         setRailProjectUrl(data.projectUrl)
         railRegionRef.current = data.region_label ?? (data.region ? railwayRegionLabel(data.region) : null)
@@ -784,8 +787,9 @@ export default function DeployWizard() {
             )}
 
             {method === 'railway' && railMode === 'auto' && (
-              <RailwayTokenPanel
-                tokens={railTokens}
+              <>
+                <RailwayTokenPanel
+                  tokens={railTokens}
                 selectedId={railTokenId}
                 onSelect={setRailTokenId}
                 newName={newRailName}
@@ -812,7 +816,27 @@ export default function DeployWizard() {
                     setRailSaving(false)
                   }
                 }}
-              />
+                />
+
+                <div className="rounded-xl border border-purple-500/25 bg-purple-500/5 p-4">
+                  <label className="block text-sm text-slate-300 mb-1 font-medium">منطقهٔ استقرار (Railway Region)</label>
+                  <p className="text-xs text-slate-400 mb-3 leading-relaxed">
+                    هر استقرار روی منطقهٔ انتخابی خودش بالا می‌آید — نزدیک‌ترین منطقه به کاربرانتان را انتخاب کنید.
+                    علاوه بر منطقه، نام پروژه و رمز ادمین و کلید سشن هر سرور جداگانه و یکتا ساخته می‌شود؛
+                    هیچ تنظیمی بین دو استقرار مشترک نیست.
+                  </p>
+                  <select
+                    value={railRegion}
+                    onChange={(e) => setRailRegion(e.target.value)}
+                    className="w-full bg-slate-900/60 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-purple-500 outline-none"
+                    dir="ltr"
+                  >
+                    {RAILWAY_REGIONS.map((r) => (
+                      <option key={r.id} value={r.id}>{r.label} — {r.area}</option>
+                    ))}
+                  </select>
+                </div>
+              </>
             )}
 
             <div>
@@ -936,6 +960,7 @@ export default function DeployWizard() {
                   <option value="custom">ورکر سفارشی ما — CFnew v2.9.8c (پنل داخلی با تنظیمات کامل)</option>
                   <option value="nexus">NEXUS — نسل جدید (پنل داخلی هوشمند + نقشهٔ زنده + مبهم‌سازی پیشرفته)</option>
                   <option value="miliconfigzeus">miliconfig zeus — پنل کامل D1 (مدیریت کاربران، سهمیه، اسکنر)</option>
+                  <option value="zeus">ZEUS PANEL — پنل کامل ضد فیلتر (Z-E-U-S · فرگمنت، اثرانگشت، ECH)</option>
                 </select>
               )}
               <p className="text-xs text-slate-500 mt-2">
@@ -947,6 +972,8 @@ export default function DeployWizard() {
                   ? <>NEXUS — نسل جدید ورکر با پنل داخلی تنظیمات هوشمند، نقشهٔ زندهٔ سراسری، مبهم‌سازی پیشرفته و ساب‌نویس خودکار. پنل با همان UUID در مسیر <code className="text-brand-300">/{uuid}</code> باز می‌شود و تنظیمات در KV (<code className="text-brand-300">C</code> / <code className="text-brand-300">c</code>) ذخیره می‌شود.</>
                   : workerSource === 'miliconfigzeus'
                   ? <>پنل کامل miliconfigzeus با دیتابیس اختصاصی D1 مستقر می‌شود (خودکار ساخته می‌شود). مدیریت کاربران، سهمیه‌ها و اسکنر داخل خود پنل مستقر است؛ آدرس پنل، ریشه همان ورکر خواهد بود. این سورس همیشه به‌صورت Workers مستقر می‌شود.</>
+                  : workerSource === 'zeus'
+                  ? <>پنل ZEUS از مخزن <a href="https://github.com/panel-zeus/Z-E-U-S" target="_blank" rel="noopener noreferrer" className="text-brand-400 hover:underline" dir="ltr">panel-zeus/Z-E-U-S</a> روی Workers + دیتابیس D1 اختصاصی (خودکار ساخته می‌شود) مستقر می‌شود. آدرس پنل ریشهٔ همان ورکر است و رمز مدیر را در اولین ورود به پنل خودتان تعیین می‌کنید. ضد فیلترینگ (فرگمنت TLS با پریست اپراتورها، جعل اثرانگشت ClientHello، بلاک NSFW با DoH) داخل خود پنل فعال می‌شود و به‌روزرسانی کد از همین مخزن با دکمهٔ «به‌روزرسانی از مخزن» انجام می‌شود.</>
                   : method === 'render'
                   ? <>{PANEL.name} با کلید API رندر روی Render.com مستقر می‌شود — سرویس Docker (xray-core + پنل) از همان Dockerfile رسمی بیلد می‌شود. بعد از موفقیت، از <code className="text-brand-300">{PANEL.panelPath}</code> وارد پنل شوید (رمز ادمین موقع استقرار ساخته و همین‌جا نمایش داده می‌شود).</>
                   : method === 'railway'
@@ -973,7 +1000,7 @@ export default function DeployWizard() {
             </div>
             )}
 
-            {(method === 'workers' || method === 'pages') && workerSource !== 'custom' && workerSource !== 'nexus' && (
+            {(method === 'workers' || method === 'pages') && workerSource !== 'custom' && workerSource !== 'nexus' && workerSource !== 'zeus' && workerSource !== 'miliconfigzeus' && (
               <div>
                 <label className="block text-sm text-slate-300 mb-2 font-medium">رمز ادمین — اختیاری</label>
                 <input
@@ -1013,7 +1040,7 @@ export default function DeployWizard() {
                 </div>
                 <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
                   <p className="text-xs text-slate-500 mb-1">{panelMethod ? 'پنل' : 'منبع ورکر'}</p>
-                  <p className="text-white font-medium" dir={panelMethod ? undefined : 'ltr'}>{panelMethod ? PANEL.name : workerSource === 'custom' ? 'ورکر سفارشی ما' : workerSource === 'nexus' ? 'NEXUS — نسل جدید' : workerSource === 'miliconfigzeus' ? 'miliconfig zeus' : workerSource === 'edgetunnel' ? 'cmliu/edgetunnel' : 'cmliu/edgetunnel (KV)'}</p>
+                  <p className="text-white font-medium" dir={panelMethod ? undefined : 'ltr'}>{panelMethod ? PANEL.name : workerSource === 'custom' ? 'ورکر سفارشی ما' : workerSource === 'nexus' ? 'NEXUS — نسل جدید' : workerSource === 'miliconfigzeus' ? 'miliconfig zeus' : workerSource === 'zeus' ? 'ZEUS PANEL (Z-E-U-S)' : workerSource === 'edgetunnel' ? 'cmliu/edgetunnel' : 'cmliu/edgetunnel (KV)'}</p>
                 </div>
                 {!panelMethod && (
                 <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
@@ -1044,7 +1071,7 @@ export default function DeployWizard() {
                   <p className="text-white font-medium" dir="ltr">
                     {panelMethod
                       ? `${PANEL.panelPath} (${PANEL.name})`
-                      : workerSource === 'nexus' ? `/${uuid || '…'}` : `/${customPath || 'admin'}`}
+                      : workerSource === 'zeus' ? '/' : workerSource === 'nexus' ? `/${uuid || '…'}` : `/${customPath || 'admin'}`}
                   </p>
                 </div>
               </div>

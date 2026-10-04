@@ -242,6 +242,10 @@ CREATE TABLE IF NOT EXISTS injector_jobs (
   proxies TEXT NOT NULL DEFAULT '[]',
   sub_token TEXT NOT NULL UNIQUE,
   rotate_minutes INTEGER,
+  ech INTEGER NOT NULL DEFAULT 0,
+  ech_sni TEXT,
+  ech_dns TEXT,
+  fragment TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

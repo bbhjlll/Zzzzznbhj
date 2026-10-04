@@ -653,7 +653,7 @@ export async function deployToRailway(
     /* the domain can still be generated later from the dashboard */
   }
 
-  // 3d. Attach a persistent volume to the panel's data directory. Railway wipes
+// 3d. Attach a persistent volume to the panel's data directory. Railway wipes
   //     the container filesystem on every redeploy, so a panel that keeps its
   //     users/config in SQLite would silently reset to defaults without this.
   //
@@ -740,15 +740,11 @@ export async function deployToRailway(
   // mount, and images that run as an unprivileged user otherwise cannot.
   if (panel.env.dataDir) envVars.push({ name: RUN_AS_ROOT_VAR, value: '0', secret: false })
   const uniqueEnvVars = [...new Map(envVars.map((item) => [item.name, item])).values()]
-  for (const { name, value } of uniqueEnvVars) {
+  for (const { name, value, secret } of uniqueEnvVars) {
     // `skipDeploys` matters: every variable write otherwise starts its own
     // deployment, so a panel would build three or four times in a row (wasting
     // build minutes and flapping the service) before the real deploy below.
-    await gql(
-      token,
-      'mutation ($input: VariableUpsertInput!) { variableUpsert(input: $input) }',
-      { input: { projectId, environmentId, serviceId, name, value, skipDeploys: true } },
-    ).catch(() => null)
+    await upsertVariable(token, { projectId, environmentId, serviceId, name, value, secret: !!secret })
   }
 
   // 5. Fetch the newest main commit and deploy exactly that revision. This is
@@ -828,6 +824,40 @@ export async function updateRailwayPanel(
   ).catch(() => null)
   const deploymentId = await triggerRailwayDeploy(token, serviceId, environmentId, latest.sha)
   return { deploymentId, commitSha: latest.sha, commitUrl: latest.url }
+}
+
+/**
+ * Upsert one service variable without starting a deployment for it. Secret
+ * values are sealed so Railway never hands them back through the dashboard,
+ * the CLI or the API; sealing is a newer API capability, so an API version
+ * that rejects `isSealed` falls back to a plain upsert — the variable is still
+ * set and the deploy still works, it is just readable in the dashboard.
+ */
+async function upsertVariable(
+  token: string,
+  input: { projectId: string; environmentId: string; serviceId: string; name: string; value: string; secret: boolean },
+): Promise<void> {
+  const mutation = 'mutation ($input: VariableUpsertInput!) { variableUpsert(input: $input) }'
+  const base = {
+    projectId: input.projectId,
+    environmentId: input.environmentId,
+    serviceId: input.serviceId,
+    name: input.name,
+    value: input.value,
+    // Every variable write otherwise starts its own deployment, so a panel
+    // would build three or four times in a row (wasting build minutes and
+    // flapping the service) before the real deploy below.
+    skipDeploys: true,
+  }
+  if (input.secret) {
+    try {
+      await gql(token, mutation, { input: { ...base, isSealed: true } })
+      return
+    } catch {
+      /* `isSealed` unsupported here — fall through to the plain upsert */
+    }
+  }
+  await gql(token, mutation, { input: base }).catch(() => null)
 }
 
 /** Poll the status of a deployment started with deployToRailway. */

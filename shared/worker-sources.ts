@@ -76,6 +76,18 @@ export const WORKER_SOURCES_CATALOG: WorkerSourceSpec[] = [
     verifiedAt: '2026-09-12',
   },
   {
+    id: 'zeus',
+    name: 'ZEUS PANEL — پنل کامل ضد فیلتر (Z-E-U-S)',
+    repo: 'panel-zeus/Z-E-U-S',
+    url: 'https://github.com/panel-zeus/Z-E-U-S',
+    origin: 'ir',
+    mode: 'auto',
+    description:
+      'پنل کامل روی Workers + D1: VLESS/Trojan، چندمسیره، فرگمنت TLS با پریست اپراتورهای ایرانی، جعل اثرانگشت ClientHello، بلاک NSFW با DoH و چرخش IP لبه — دیتابیس خودکار ساخته می‌شود و به‌روزرسانی از همین مخزن انجام می‌شود.',
+    lastCommit: '2026-09-23',
+    verifiedAt: '2026-10-04',
+  },
+  {
     id: 'edgetunnel',
     name: 'cmliu/edgetunnel — ورکر کامل',
     repo: 'cmliu/edgetunnel',

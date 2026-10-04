@@ -188,6 +188,10 @@ const SCHEMA_STATEMENTS = [
     proxies TEXT NOT NULL DEFAULT '[]',
     sub_token TEXT NOT NULL UNIQUE,
     rotate_minutes INTEGER,
+    ech INTEGER NOT NULL DEFAULT 0,
+    ech_sni TEXT,
+    ech_dns TEXT,
+    fragment TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
@@ -316,6 +320,11 @@ const MIGRATIONS = [
   `ALTER TABLE render_deploys ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE render_deploys ADD COLUMN last_version TEXT`,
   `ALTER TABLE render_deploys ADD COLUMN last_updated_at TEXT`,
+  // Injected subs: ECH + TLS fragmentation (anti-censorship) per sub.
+  `ALTER TABLE injector_jobs ADD COLUMN ech INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE injector_jobs ADD COLUMN ech_sni TEXT`,
+  `ALTER TABLE injector_jobs ADD COLUMN ech_dns TEXT`,
+  `ALTER TABLE injector_jobs ADD COLUMN fragment TEXT`,
 ]
 
 let ready: Promise<void> | null = null

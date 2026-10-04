@@ -37,6 +37,11 @@ export default function Optimizer() {
   const [fragFm, setFragFm] = useState('')
   const [fragCs, setFragCs] = useState('')
 
+  // ── ECH (encrypted ClientHello) ──
+  const [echEnabled, setEchEnabled] = useState(false)
+  const [echSni, setEchSni] = useState('cloudflare-ech.com')
+  const [echDns, setEchDns] = useState('https://dns.alidns.com/dns-query')
+
   // ── EDT-Pages proxy auto-fetch ──
   const [proxyProtocol, setProxyProtocol] = useState<'socks5' | 'https'>('socks5')
   const [proxyLists, setProxyLists] = useState<Record<string, string[]>>({})
@@ -148,7 +153,7 @@ export default function Optimizer() {
           ...(m[2] ? { username: m[2] } : {}), ...(m[3] ? { password: m[3] } : {}),
         }
       }).filter(Boolean)
-      await api('/injector', { method: 'POST', body: { name: injName.trim(), source: input.trim(), ips, proxies, rotate_minutes: injRotate ? Number(injRotate) : null, ...(fragEnabled ? { fragment: { enabled: true, fm: fragFm || undefined, cs: fragCs || undefined, preset: fragPreset || undefined } } : {}) } })
+      await api('/injector', { method: 'POST', body: { name: injName.trim(), source: input.trim(), ips, proxies, rotate_minutes: injRotate ? Number(injRotate) : null, ...(echEnabled ? { ech: true, ech_sni: echSni.trim() || undefined, ech_dns: echDns.trim() || undefined } : {}), ...(fragEnabled ? { fragment: { enabled: true, fm: fragFm || undefined, cs: fragCs || undefined, preset: fragPreset || undefined } } : {}) } })
       setInjIps(''); setInjProxies(''); setInjName('')
       await loadInjections()
     } catch (e) {
@@ -303,7 +308,7 @@ export default function Optimizer() {
                   <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all"
                     style={{ right: fragEnabled ? '2px' : '18px' }} />
                 </span>
-                🧩 فرگمنت (TLS Fragment) — تزریق در JSON sing-box
+                🧩 فرگمنت (TLS Fragment) — پارامترهای fm/cs روی لینک‌های نود
               </button>
               {fragEnabled && (
                 <div className="mt-3 space-y-3">
@@ -350,6 +355,34 @@ export default function Optimizer() {
               )}
             </div>
 
+            {/* ECH — encrypts the client SNI itself */}
+            <div className="border-t border-slate-800 pt-3">
+              <button onClick={() => setEchEnabled(!echEnabled)} className="flex items-center gap-2 text-sm text-slate-300">
+                <span className={`w-9 h-5 rounded-full transition-colors relative ${echEnabled ? 'bg-brand-500' : 'bg-slate-700'}`}>
+                  <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all"
+                    style={{ right: echEnabled ? '2px' : '18px' }} />
+                </span>
+                🔐 ECH — رمزنگاری خود SNI (ضد شناسایی حداکثری)
+              </button>
+              {echEnabled && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3 w-full">
+                  <div>
+                    <label className="text-xs text-slate-400 mb-1 block">ECH SNI</label>
+                    <input value={echSni} onChange={(e) => setEchSni(e.target.value)} dir="ltr"
+                      className="input-field font-mono text-[11px] w-full" placeholder="cloudflare-ech.com" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 mb-1 block">ECH DNS (DoH)</label>
+                    <input value={echDns} onChange={(e) => setEchDns(e.target.value)} dir="ltr"
+                      className="input-field font-mono text-[11px] w-full" placeholder="https://dns.alidns.com/dns-query" />
+                  </div>
+                  <p className="text-[11px] text-slate-500 sm:col-span-2">
+                    فقط روی نودهای TLS اعمال می‌شود (پارامتر <code dir="ltr">ech=</code> روی لینک ساب). کلاینت‌های قدیمی ECH را نمی‌شناسند.
+                  </p>
+                </div>
+              )}
+            </div>
+
             {/* Injection name + rotate + create button */}
             <div className="grid grid-cols-1 sm:flex sm:gap-2 sm:flex-wrap items-end gap-2">
               <input value={injName} onChange={(e) => setInjName(e.target.value)} placeholder="نام ساب (اختیاری)" className="input-field text-sm sm:flex-1 sm:min-w-[140px]" />
@@ -380,6 +413,10 @@ export default function Optimizer() {
                   <div className="min-w-0">
                     <p className="text-sm text-white font-medium">{inj.name}</p>
                     <p className="text-xs text-slate-500">{inj.ips.length} IP · {inj.proxies.length} پروکسی</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      {inj.ech?.enabled && <span className="text-emerald-400 ml-2">ECH: {inj.ech.sni}</span>}
+                      {inj.fragment?.enabled && <span className="text-amber-400 ml-2">🧩 فرگمنت</span>}
+                    </p>
                   </div>
                   <div className="flex items-center gap-1">
                     <button onClick={() => copy(injSub, inj.id)} className="px-3 py-1.5 rounded-lg bg-slate-800/60 text-xs text-slate-300 hover:text-brand-300 flex items-center gap-1">

@@ -241,6 +241,8 @@ function WorkersTab() {
   const [loading, setLoading] = useState(true)
   const [configModal, setConfigModal] = useState<Deployment | null>(null)
   const [togglingId, setTogglingId] = useState<string | null>(null)
+  const [updatingId, setUpdatingId] = useState<string | null>(null)
+  const [updateMsg, setUpdateMsg] = useState<{ id: string; text: string; ok: boolean } | null>(null)
   const [copiedSub, setCopiedSub] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
@@ -306,6 +308,25 @@ function WorkersTab() {
     setTogglingId(null)
   }
 
+  // Pull the worker's source from its upstream repo again. The D1 database,
+// R2 bucket and every variable stay exactly as they are — only the code is
+// replaced, and an unchanged repo uploads nothing.
+  const updateFromRepo = async (dep: Deployment) => {
+    setUpdatingId(dep.id)
+    setUpdateMsg(null)
+    try {
+      const res = await api<{ updated: boolean; message: string }>('/deployments/update', {
+        method: 'POST',
+        body: { deployment_id: dep.id },
+      })
+      setUpdateMsg({ id: dep.id, text: res.message, ok: true })
+      await load()
+    } catch (e) {
+      setUpdateMsg({ id: dep.id, text: e instanceof Error ? e.message : 'به‌روزرسانی ناموفق بود', ok: false })
+    }
+    setUpdatingId(null)
+  }
+
   const copySub = async (url: string, key: string) => {
     try { await navigator.clipboard.writeText(url); setCopiedSub(key); setTimeout(() => setCopiedSub(null), 2000) } catch {}
   }
@@ -354,6 +375,9 @@ function WorkersTab() {
         const isDisabled = !!cfg.disabled
         const isExpanded = expandedId === dep.id
         const isToggling = togglingId === dep.id
+        // KV-backed sources (edgetunnel/custom/NEXUS) have the KV config panel;
+        // D1 panels (ZEUS) keep everything in their own UI, so we hide it.
+        const isKvSource = !!dep.kv_namespace_id
 
         return (
           <div key={dep.id} className="glass-card animate-slide-up" style={{ animationDelay: `${i * 40}ms` }}>
@@ -367,17 +391,32 @@ function WorkersTab() {
                   <span className={`badge ${st.bg} ${st.color} ${st.border} border`}>{isDisabled ? 'غیرفعال' : st.label}</span>
                   <span className="badge bg-slate-700/30 text-slate-400">{dep.method === 'workers' ? 'Workers' : 'Pages'}</span>
                 </div>
-                <p className="text-xs text-slate-500 mt-0.5">{new Date(dep.created_at).toLocaleString('fa-IR')}</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {new Date(dep.created_at).toLocaleString('fa-IR')}
+                  {typeof cfg.source_synced_at === 'string' && cfg.source_synced_at && (
+                    <span className="text-slate-600"> · آخرین همگام‌سازی با مخزن: {new Date(cfg.source_synced_at).toLocaleString('fa-IR')}</span>
+                  )}
+                </p>
+                {updateMsg?.id === dep.id && (
+                  <p className={`text-xs mt-1 ${updateMsg.ok ? 'text-emerald-400' : 'text-error-400'}`}>{updateMsg.text}</p>
+                )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                {dep.status === 'deployed' && (
+                {dep.status === 'deployed' && isKvSource && (
                   <button onClick={() => toggleWorker(dep)} disabled={isToggling}
                     title={isDisabled ? 'فعال‌سازی' : 'غیرفعال‌سازی'}
                     className={`p-2 rounded-lg transition-all disabled:opacity-50 ${isDisabled ? 'bg-green-500/10 text-green-400 hover:bg-green-500/20' : 'bg-slate-700/30 text-slate-400 hover:bg-slate-700/50'}`}>
                     {isToggling ? <Loader2 className="w-4 h-4 animate-spin" /> : isDisabled ? <Power className="w-4 h-4" /> : <PowerOff className="w-4 h-4" />}
                   </button>
                 )}
-                {dep.status === 'deployed' && (
+                {dep.status === 'deployed' && dep.method === 'workers' && (
+                  <button onClick={() => updateFromRepo(dep)} disabled={updatingId === dep.id}
+                    title="به‌روزرسانی کد از مخزن اصلی (دیتابیس و متغیرها دست‌نخورده)"
+                    className="p-2 rounded-lg bg-slate-700/30 text-slate-400 hover:bg-brand-500/10 hover:text-brand-400 transition-all disabled:opacity-50">
+                    {updatingId === dep.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  </button>
+                )}
+                {dep.status === 'deployed' && isKvSource && (
                   <button onClick={() => setConfigModal(dep)} title="تنظیمات ورکر"
                     className="p-2 rounded-lg bg-slate-700/30 text-slate-400 hover:bg-brand-500/10 hover:text-brand-400 transition-all">
                     <Settings2 className="w-4 h-4" />

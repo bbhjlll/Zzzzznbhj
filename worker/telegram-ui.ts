@@ -989,7 +989,7 @@ async function deployWizard(args: RouterArgs, a: string, b: string): Promise<Scr
         text:
           `🚀 <b>استقرار پنل روی ${label} شروع شد</b>\n\n` +
           `🧩 ${resolvePanel(data.panel).name}\n` +
-          `📦 <code>${data.name}</code>\n\n` +
+          `📦 <code>${started.projectName}</code>\n\n` +
           'پروژه ساخته می‌شود، مخزن پنل متصل و متغیرهای محیطی ست می‌شوند. معمولاً ۲ تا ۵ دقیقه طول می‌کشد؛ به محض آماده‌شدن، نتیجه و رمز ادمین همین‌جا اعلام می‌شود.',
         keyboard: {
           inline_keyboard: [

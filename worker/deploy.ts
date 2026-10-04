@@ -1,5 +1,5 @@
 import type { Env } from './env'
-import { nowIso, genId, edgetunnelSubToken } from './util'
+import { nowIso, genId, edgetunnelSubToken, safeJsonParse } from './util'
 import { notifyDeployment } from './telegram'
 
 // ── Ported 1:1 from the original cf-deploy function (Supabase → D1) ────────
@@ -8,7 +8,7 @@ import { notifyDeployment } from './telegram'
 
 const API_BASE = 'https://api.cloudflare.com/client/v4'
 
-interface WorkerSourceConfig {
+export interface WorkerSourceConfig {
   url: string
   label: string
   compat: string
@@ -87,6 +87,19 @@ const WORKER_SOURCES: Record<string, WorkerSourceConfig> = {
     ],
     kind: 'nexus',
   },
+  zeus: {
+    // ZEUS PANEL (panel-zeus/Z-E-U-S) — full D1 panel, anti-censorship core:
+    // TLS fragmentation, ClientHello fingerprint spoofing, D1-backed users.
+    url: 'https://raw.githubusercontent.com/panel-zeus/Z-E-U-S/main/Source.js',
+    label: 'ZEUS PANEL (panel-zeus/Z-E-U-S)',
+    // Read from the panel's own source (compatibility_date: "2026-07-10").
+    compat: '2026-07-10',
+    kvBinding: '',
+    configKey: '',
+    configFormat: 'custom',
+    uuidEnvName: '',
+    kind: 'zeus',
+  },
   miliconfigzeus: {
     url: 'https://raw.githubusercontent.com/miladjahani/miliconfigzeus/main/Source-2.js',
     label: 'miliconfig zeus (full D1 panel)',
@@ -97,6 +110,70 @@ const WORKER_SOURCES: Record<string, WorkerSourceConfig> = {
     uuidEnvName: '',
     kind: 'zeus',
   },
+}
+
+/** Source config for a worker_source id (unknown → the edgetunnel default). */
+export function workerSourceConfig(workerSource: string | null | undefined): WorkerSourceConfig {
+  return WORKER_SOURCES[workerSource ?? 'edgetunnel'] ?? WORKER_SOURCES.edgetunnel
+}
+
+export interface FetchedSource {
+  code: string
+  url: string
+  /** raw.githubusercontent ETag = sha256 of the file — a perfect "did upstream
+   *  change?" fingerprint, so a re-deploy never pushes an identical script. */
+  etag: string
+  usedFallback: boolean
+}
+
+/**
+ * Download a worker source from its upstream repository, trying the primary
+ * URL first and then any fallback (mirrors / the copy bundled with this panel)
+ * so a moved or renamed repo can never 404 a deployment.
+ */
+export async function fetchWorkerSource(
+  sourceConfig: WorkerSourceConfig,
+  fallbackUrls: string[],
+): Promise<FetchedSource | null> {
+  for (const [i, url] of [sourceConfig.url, ...fallbackUrls].entries()) {
+    try {
+      const resp = await fetch(url)
+      if (resp.ok && Number(resp.headers.get('content-length') ?? '1') !== 0) {
+        const text = await resp.text()
+        if (text.trim().length > 0) {
+          return {
+            code: text,
+            url,
+            etag: (resp.headers.get('etag') ?? '').trim(),
+            usedFallback: i > 0,
+          }
+        }
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return null
+}
+
+/** Store the upstream fingerprint on the deployment so "update from repo" can
+ *  tell the user whether anything actually changed. */
+export async function recordSourceFingerprint(
+  env: Env,
+  deploymentId: string,
+  source: { url: string; etag: string; bytes: number },
+): Promise<void> {
+  const row = await env.DB.prepare('SELECT config FROM deployments WHERE id = ?')
+    .bind(deploymentId)
+    .first<{ config: string | null }>()
+  const cfg = safeJsonParse<Record<string, unknown>>(row?.config ?? '', {})
+  cfg.source_url = source.url
+  cfg.source_etag = source.etag
+  cfg.source_bytes = source.bytes
+  cfg.source_synced_at = nowIso()
+  await env.DB.prepare('UPDATE deployments SET config = ?, updated_at = ? WHERE id = ?')
+    .bind(JSON.stringify(cfg), nowIso(), deploymentId)
+    .run()
 }
 
 /** Input shared by the web API and the Telegram bot when starting a deploy. */
@@ -259,34 +336,29 @@ export async function runDeployment(env: Env, job: DeployJob): Promise<void> {
     let workerCode = ''
     // Primary URL first; if unavailable (e.g. repo moved/renamed), fall back to
     // the copy bundled with this panel so the default source can never 404.
-    // Fallbacks may be absolute (a mirror) or panel-relative (the copy bundled
+// Fallbacks may be absolute (a mirror) or panel-relative (the copy bundled
     // in `public/repo/`, e.g. `/repo/nexus.js`). Relative ones are resolved
     // against this installation's own origin — the repo is private, so the raw
     // mirrors 404 and the bundled copy is the only one that works.
     const fallbackUrls = (sourceConfig.fallbackUrls ?? []).map((u) =>
       /^https?:\/\//i.test(u) ? u : `${job.origin.replace(/\/$/, '')}${u.startsWith('/') ? u : `/${u}`}`,
     )
-    for (const [i, url] of [sourceConfig.url, ...fallbackUrls].entries()) {
-      try {
-        const resp = await fetch(url)
-        if (resp.ok && Number(resp.headers.get('content-length') ?? '1') !== 0) {
-          const text = await resp.text()
-          if (text.trim().length > 0) {
-            workerCode = text
-            if (i > 0) await appendLog(env, deployment_id, `primary source unavailable, used fallback (${new URL(url).host})`)
-            break
-          }
-        }
-      } catch {
-        // try next candidate
-      }
-    }
+    const fetched = await fetchWorkerSource(sourceConfig, fallbackUrls)
+    workerCode = fetched?.code ?? ''
     if (!workerCode) {
       await appendLog(env, deployment_id, '✗ failed to fetch worker source')
       await updateDeployment(env, deployment_id, 'failed', { error_message: 'failed to fetch worker source' })
       return
     }
+    if (fetched?.usedFallback) {
+      await appendLog(env, deployment_id, `primary source unavailable, used fallback (${new URL(fetched.url).host})`)
+    }
     await appendLog(env, deployment_id, `✓ worker source fetched (${workerCode.length} bytes)`)
+    await recordSourceFingerprint(env, deployment_id, {
+      url: fetched!.url,
+      etag: fetched!.etag,
+      bytes: workerCode.length,
+    })
 
     // ── Provision storage: full D1 database (zeus) or KV namespace ──────
     let d1DatabaseId = ''

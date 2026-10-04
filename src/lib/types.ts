@@ -157,6 +157,10 @@ export interface InjectedSub {
   proxies: ProxySpec[]
   sub_token: string
   created_at: string
+  /** ECH applied to every TLS node of this sub. */
+  ech: { enabled: boolean; sni: string; dns: string }
+  /** TLS fragmentation / cipher masking applied to this sub. */
+  fragment: { enabled: boolean; fm?: string; cs?: string; preset?: string }
 }
 
 export interface CountryLocationConfig {

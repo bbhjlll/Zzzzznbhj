@@ -2,6 +2,7 @@ import type { Env } from './env'
 import { apiError, json, getUserFromRequest, logActivity, genId, nowIso, safeJsonParse } from './util'
 import { handleSignup, handleLogin, handleLogout, handleMe, isOwner } from './auth'
 import { startDeployment } from './deploy'
+import { handleDeploymentUpdate } from './update'
 import { verifyRailwayToken, RailwayApiError } from './railway'
 import { verifyRenderToken, RenderApiError } from './render'
 import {
@@ -156,6 +157,10 @@ async function handleRailwayDeploy(env: Env, userId: string, request: Request): 
       panel: panel.id,
       panel_name: panel.name,
       panel_path: panel.panelPath,
+      // The unique name this deployment got (may carry a suffix when the
+      // requested name was already used by another deployment).
+      project_name: started.projectName,
+      // This deployment's own credentials — returned exactly once, here.
       admin_username: started.adminUsername,
       admin_password: started.adminPassword,
       // The region Railway confirmed — the wizard shows this instead of assuming
@@ -380,6 +385,7 @@ async function handleRenderDeploy(env: Env, userId: string, request: Request): P
       panel: panel.id,
       panel_name: panel.name,
       panel_path: panel.panelPath,
+      project_name: started.projectName,
       admin_username: started.adminUsername,
       admin_password: started.adminPassword,
     },
@@ -852,6 +858,8 @@ async function handleRouted(
     if (path === '/api/deployments' && method === 'POST') return await createDeployment(env, user.id, request, ctx, origin)
     if (path.match(/^\/api\/deployments\/[^/]+$/) && method === 'GET') return await getDeployment(env, user.id, path.split('/')[3])
     if (path.match(/^\/api\/deployments\/[^/]+$/) && method === 'DELETE') return await deleteDeployment(env, user.id, path.split('/')[3])
+    // Pull the worker source from its upstream repo again — D1/R2/KV untouched.
+    if (path === '/api/deployments/update' && method === 'POST') return await handleDeploymentUpdate(env, user.id, request)
 
     // The deployer bot is the owner's own tool: it is not a panel feature for
     // users or admins, so the whole section is closed to everyone else.
