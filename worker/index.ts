@@ -21,7 +21,7 @@ import {
 import { handleWorkerConfig } from './kvconfig'
 import { handleIpScanner, handleRangeScan } from './scanner'
 import { handleTelegramWebhook } from './telegram'
-import { syncBotProfile } from './telegram-core'
+import { panelAppUrl, syncBotProfile } from './telegram-core'
 import { ensureSchema } from './schema'
 import { handleOptimizerCreate, handleOptimizerList, handleOptimizerGet, handleOptimizerDelete, serveOptimizerSub } from './optimizer'
 import { handleOptProbe, handleOptPorts, handleOptScanBatch, handleOptSpeedtest } from './probe'
@@ -573,6 +573,9 @@ async function reconnectBotWebhook(env: Env, userId: string, origin: string): Pr
   await env.DB.prepare('UPDATE bot_config SET webhook_url = ?, webhook_secret = ?, is_active = 1, updated_at = ? WHERE id = ?')
     .bind(`${origin}/api/webhooks/telegram`, secret, nowIso(), row.id)
     .run()
+  // Refresh the profile + "باز کردن پنل" menu button too, so changing PANEL_URL
+  // takes effect without the owner having to retype the bot token.
+  await syncBotProfile(sanitizeBotToken(row.bot_token), panelAppUrl(env, origin)).catch(() => null)
   await logActivity(env, userId, 'bot_webhook_reconnected', 'bot', null)
   return getBotConfig(env, userId)
 }
@@ -692,7 +695,7 @@ async function saveBotConfig(env: Env, userId: string, request: Request, origin:
 
   // Register the command list, description and the "open web panel" button so
   // the bot behaves like an app from the very first time it is opened.
-  await syncBotProfile(botToken, origin).catch(() => null)
+  await syncBotProfile(botToken, panelAppUrl(env, origin)).catch(() => null)
 
   await logActivity(env, userId, 'bot_configured', 'bot', botUsername)
   return getBotConfig(env, userId, origin)

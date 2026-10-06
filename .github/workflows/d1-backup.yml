@@ -1,0 +1,74 @@
+name: D1 off-site backup
+
+# Keeps a full SQL dump of the panel's D1 database OUTSIDE Cloudflare, on a
+# dedicated branch of this (private) repository, so a banned or deleted
+# Cloudflare account can never take the admin and user data with it — and the
+# dump can be restored onto any other Cloudflare account.
+#
+# ⚠️ The dump contains the panel's secrets (password hashes, Cloudflare tokens,
+# the bot token). That is why it lives on a branch of a PRIVATE repo — never
+# make this repository public while the backups branch exists.
+#
+# Restore onto a fresh Cloudflare account:
+#   npx wrangler d1 create <name>            # then put its id in wrangler.toml
+#   npx wrangler d1 execute <name> --remote --file=./backups/d1-YYYY-MM-DD.sql
+#   npx wrangler deploy
+#
+# Requires repository secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   (D1: Read is enough)
+#   CLOUDFLARE_ACCOUNT_ID
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # daily at 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: d1-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Export the D1 database
+        run: npx --yes wrangler@4 d1 export miliconfigpro-v1 --remote --output=/tmp/d1-backup.sql
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Publish the snapshot to the backups branch
+        run: |
+          set -eu
+          DATE=$(date -u +%F)
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Reuse the branch when it exists; otherwise start a fresh (orphan)
+          # branch that holds nothing but the snapshots.
+          if git ls-remote --exit-code --heads origin d1-backups >/dev/null 2>&1; then
+            git fetch --depth=1 origin d1-backups
+            git checkout -B d1-backups FETCH_HEAD
+          else
+            git checkout --orphan d1-backups
+            git rm -rf --cached . >/dev/null 2>&1 || true
+            git clean -fdx >/dev/null
+          fi
+
+          mkdir -p backups
+          cp /tmp/d1-backup.sql "backups/d1-${DATE}.sql"
+          git add backups
+          if git diff --cached --quiet; then
+            echo "backup unchanged — nothing to commit"
+            exit 0
+          fi
+          git commit -m "chore(backup): D1 snapshot ${DATE}"
+          git push origin d1-backups

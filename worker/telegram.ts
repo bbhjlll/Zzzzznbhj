@@ -9,6 +9,7 @@ import {
   notifyDeployment,
   notifyOptimizer,
   notifyQuotaLevel,
+  panelAppUrl,
   renderScreen,
   resolveConfig,
   resolveTenant,
@@ -167,7 +168,9 @@ export async function handleTelegramWebhook(
     userId: tenant.user_id,
     tenant,
     botUsername: cfg.bot_username ?? null,
-    origin,
+    // Links back into the app point at PANEL_URL when the panel is hosted
+    // elsewhere; otherwise at this Worker's own origin.
+    origin: panelAppUrl(env, origin),
   }
 
   // ── Inline button presses ────────────────────────────────────────────────

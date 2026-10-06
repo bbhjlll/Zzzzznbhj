@@ -12,6 +12,13 @@ set -eu
 DB_NAME="miliconfigpro-v1"
 CONFIG_OUT="wrangler.deploy.toml"
 
+# `dist/` is a build artifact (it is gitignored) and the Worker serves its JS
+# bundle straight from there. Deploying without a fresh build ships an
+# index.html whose script 404s, which renders the whole panel as a blank page.
+# So the frontend is rebuilt on every deploy path, including Cloudflare Builds.
+echo "── building frontend ──"
+npx vite build
+
 # wrangler.toml now declares the D1 binding itself, so a plain deploy always
 # carries it. The fallback below only runs for older checkouts without it.
 if grep -q '^\[\[d1_databases\]\]' wrangler.toml; then

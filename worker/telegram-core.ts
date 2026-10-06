@@ -122,6 +122,20 @@ export function answerCb(token: string, id: string, text?: string): Promise<TgEn
   return tg(token, 'answerCallbackQuery', { callback_query_id: id, ...(text ? { text } : {}) })
 }
 
+/**
+ * Where the panel UI lives.
+ *
+ * By default the SPA is served by this same Worker, so the request origin *is*
+ * the panel. When the panel is hosted on a different domain, set `PANEL_URL`
+ * and every link back into the app — including the bot's "باز کردن پنل" menu
+ * button — points there instead. The webhook URL deliberately keeps the
+ * Worker's own origin, because Telegram must reach the Worker itself.
+ */
+export function panelAppUrl(env: Env, origin: string): string {
+  const override = (env.PANEL_URL ?? '').trim().replace(/\/+$/, '')
+  return override || origin
+}
+
 /** Register the bot's command list, profile texts and menu button. */
 export async function syncBotProfile(token: string, webAppUrl: string): Promise<void> {
   await tg(token, 'setMyCommands', {

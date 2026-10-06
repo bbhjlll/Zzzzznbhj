@@ -13,11 +13,15 @@ compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 # sees the Telegram deployer bot section (nav item, routes and /api/bot-*).
 [vars]
 OWNER_EMAIL = "milad201400@gmail.com"
+# Optional: public URL of the panel UI when it is served from a domain other
+# than this Worker (a static host, GitHub Pages, …). The bot's "باز کردن پنل"
+# menu button and links inside bot screens use it. Empty = this Worker's origin.
+PANEL_URL = ""
 
 [[d1_databases]]
 binding = "DB"
-database_name = "db"
-database_id = "6c89686c-97cc-4ea5-a053-7e6acd5b9051"
+database_name = "miliconfigpro-v1"
+database_id = "61b826ad-d5cc-4520-ae10-6dddee5405e9"
 
 [assets]
 directory = "./dist"
