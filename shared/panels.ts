@@ -282,6 +282,50 @@ export const PANELS: PanelSpec[] = [
 
 export const DEFAULT_PANEL_ID = PANELS[0].id
 
+// ── Admin-editable source of the dedicated panel ──────────────────────────────
+//
+// The panel ships with a repository baked into the catalog, but its address can
+// change at any time (a renamed owner, a new fork, a different upstream). So the
+// address is overridable at runtime and persisted in D1 instead of being frozen
+// in code. Everything that matters resolves through PANELS — the Railway
+// deployer, the Render blueprint, the VPS package, the upstream version probe,
+// the Telegram bot and the web UI — so one save moves the whole installation.
+
+/** Address shipped with the code — the fallback and what "reset" restores. */
+export const DEFAULT_PANEL_REPO = PANELS[0].repo
+
+/** GitHub `owner/name`, deliberately free of `/`, `?`, `#` and whitespace. */
+const PANEL_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
+
+/**
+ * Accept `owner/name`, a GitHub URL or a `.git` URL and return the canonical
+ * `owner/name`. Returns `null` when the input is not a repository address —
+ * this value is interpolated into GitHub and platform API URLs, so anything
+ * that is not a plain `owner/name` must be rejected rather than escaped.
+ */
+export function normalizePanelRepo(input: string): string | null {
+  const value = (input ?? '')
+    .trim()
+    .replace(/^https?:\/\/(?:www\.)?github\.com\//i, '')
+    .replace(/\.git\/?$/i, '')
+    .replace(/\/+$/, '')
+  return PANEL_REPO_RE.test(value) ? value : null
+}
+
+/** Point the dedicated panel at a different source repository. */
+export function applyPanelRepo(repo: string | null | undefined): void {
+  const value = normalizePanelRepo(repo ?? '')
+  if (!value) return
+  PANELS[0].repo = value
+  PANELS[0].url = `https://github.com/${value}`
+}
+
+/** Drop any override and go back to the address shipped with the code. */
+export function resetPanelRepo(): void {
+  PANELS[0].repo = DEFAULT_PANEL_REPO
+  PANELS[0].url = `https://github.com/${DEFAULT_PANEL_REPO}`
+}
+
 /**
  * Panels that were in this catalog and were **removed on the owner's request**:
  * the app now ships a single, first-party panel. They are recorded here (instead

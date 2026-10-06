@@ -23,6 +23,7 @@ import { handleIpScanner, handleRangeScan } from './scanner'
 import { handleTelegramWebhook } from './telegram'
 import { panelAppUrl, syncBotProfile } from './telegram-core'
 import { ensureSchema } from './schema'
+import { setPanelSource, syncPanelSource } from './panel-source'
 import { handleOptimizerCreate, handleOptimizerList, handleOptimizerGet, handleOptimizerDelete, serveOptimizerSub } from './optimizer'
 import { handleOptProbe, handleOptPorts, handleOptScanBatch, handleOptSpeedtest } from './probe'
 import { handleGroupCreate, handleGroupList, handleGroupDelete, handleGroupPatch, serveGroupSub } from './subgroups'
@@ -31,7 +32,7 @@ import { handleMemberCreate, handleMemberCreateMany, handleMemberList, handleMem
 import { serveStatusPage } from './status'
 import { exportBackup, importBackup } from './backup'
 import { handleSourceSettings, handleSourceNodes } from './sourcebridge'
-import { DEFAULT_RAILWAY_REGION, panelTcpPorts, railwayRegionLabel, resolvePanel } from '../shared/panels'
+import { DEFAULT_PANEL_REPO, DEFAULT_RAILWAY_REGION, panelTcpPorts, railwayRegionLabel, resolvePanel } from '../shared/panels'
 
 interface DeploymentBody {
   name?: string
@@ -196,6 +197,7 @@ async function handlePanelList(env: Env, userId: string, origin: string): Promis
         tagline: panel.tagline,
         repo: panel.repo,
         repoUrl: panel.url,
+        defaultRepo: DEFAULT_PANEL_REPO,
         port: panel.port,
         extraPorts: panel.extraPorts ?? [],
         tcpPorts: panelTcpPorts(panel),
@@ -213,6 +215,24 @@ async function handlePanelList(env: Env, userId: string, origin: string): Promis
       latestVersion,
     },
   })
+}
+
+/**
+ * Repoint the dedicated panel at a different source repository.
+ *
+ * The panel's address can change at any time, so it is stored in D1 instead of
+ * being baked into the catalog. Every path — Railway, Render, the VPS package,
+ * the upstream version probe, the Telegram bot and the web UI — reads the same
+ * override, so one save here moves the whole installation.
+ */
+async function handlePanelRepo(env: Env, userId: string, request: Request): Promise<Response> {
+  const body = safeJsonParse<{ repo?: string }>(await request.text().catch(() => ''), {})
+  const repo = await setPanelSource(env, body.repo ?? '')
+  if (!repo) {
+    return apiError('آدرس مخزن معتبر نیست — قالب باید owner/name باشد (مثلاً miliopi/Lalaland)', 400)
+  }
+  await logActivity(env, userId, 'panel_repo_changed', 'panel', repo)
+  return json({ data: { repo, defaultRepo: DEFAULT_PANEL_REPO, changed: repo !== DEFAULT_PANEL_REPO } })
 }
 
 /** Poll one hosted panel; the live transition bootstraps its admin once. */
@@ -849,6 +869,14 @@ async function handleRouted(
     if (path === '/api/render/status' && method === 'GET') return await handleRenderStatus(env, user.id, url)
 
     // ── Hosted panel registry (the dedicated catalog panel) ───────────────
+    // Repointing the source is a global change (it drives every deploy, the bot
+    // and the version probe), so only the owner or an admin may do it.
+    if (path === '/api/panels/repo' && method === 'POST') {
+      if (!(await isOwner(env, user.id)) && user.role !== 'admin') {
+        return apiError('تغییر آدرس مخزن پنل فقط برای مالک یا ادمین است', 403)
+      }
+      return await handlePanelRepo(env, user.id, request)
+    }
     if (path === '/api/panels' && method === 'GET') return await handlePanelList(env, user.id, origin)
     if (path === '/api/panels/watch' && method === 'POST') return await handlePanelWatch(env, user.id, request)
     if (path === '/api/panels/health' && method === 'POST') return await handlePanelHealth(env, user.id, request)
@@ -1005,6 +1033,9 @@ export default {
           )
         }
         await ensureSchema(env)
+        // Deploy, version probe and bot all resolve the panel's source through
+        // the shared catalog, so the admin's override is applied first.
+        await syncPanelSource(env)
       }
       const response = await handleRouted(request, env, ctx, path, origin, method)
       return withCors(response, cors)
@@ -1026,6 +1057,7 @@ export default {
       (async () => {
         try {
           await ensureSchema(env)
+          await syncPanelSource(env)
           const summary = await autoUpdatePanels(env)
           if (summary.updated || summary.failed) {
             console.log('panel auto-update:', JSON.stringify(summary))

@@ -226,6 +226,8 @@ export interface HostedPanelSpec {
   tagline: string
   repo: string
   repoUrl: string
+  /** Address shipped with the code — what "reset" restores to. */
+  defaultRepo: string
   port: number
   extraPorts: number[]
   /**

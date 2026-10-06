@@ -40,7 +40,7 @@ import {
   SlidersHorizontal,
   Trash2,
 } from 'lucide-react'
-import { DEFAULT_RAILWAY_REGION, RAILWAY_REGIONS, railwayRegionLabel, resolveRailwayRegion } from '../../shared/panels'
+import { applyPanelRepo, DEFAULT_RAILWAY_REGION, RAILWAY_REGIONS, railwayRegionLabel, resolveRailwayRegion } from '../../shared/panels'
 import { api } from '../lib/api'
 import type {
   HostedPanelDeploy,
@@ -178,6 +178,10 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
   const load = useCallback(async () => {
     try {
       const { data } = await api<{ data: HostedPanelOverview }>('/panels')
+      // The admin's source override lives server-side; mirror it into the shared
+      // catalog so every other screen (wizard, tokens, VPS package) shows — and
+      // builds — the same address.
+      applyPanelRepo(data.panel.repo)
       setData(data)
       setError(null)
     } catch (e) {
@@ -190,6 +194,38 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
   useEffect(() => {
     void load()
   }, [load])
+
+  // ── Editable source address ──────────────────────────────────────────────
+  // The panel's repository can move; the admin keeps it current from here and
+  // the server applies it to every deploy, the bot and the version probe.
+  const [repoDraft, setRepoDraft] = useState('')
+  const [repoBusy, setRepoBusy] = useState(false)
+  const [repoMsg, setRepoMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (data?.panel.repo) setRepoDraft(data.panel.repo)
+  }, [data?.panel.repo])
+
+  const saveRepo = async (e?: React.FormEvent, value?: string) => {
+    e?.preventDefault()
+    const next = (value ?? repoDraft).trim()
+    setRepoBusy(true)
+    setRepoMsg(null)
+    try {
+      const { data: res } = await api<{ data: { repo: string; defaultRepo: string; changed: boolean } }>('/panels/repo', {
+        method: 'POST',
+        body: { repo: next },
+      })
+      applyPanelRepo(res.repo)
+      setRepoMsg(res.changed ? `✓ مخزن منبع روی ${res.repo} تنظیم شد` : '✓ آدرس پیش‌فرض حفظ شد')
+      setRepoDraft(res.repo)
+      await load()
+    } catch (err) {
+      setRepoMsg(err instanceof Error ? err.message : 'خطا در ذخیرهٔ آدرس مخزن')
+    } finally {
+      setRepoBusy(false)
+    }
+  }
 
   // The direct deploy needs a Railway credential, so the control knows up front
   // whether it can start (and which token it would use).
@@ -499,6 +535,40 @@ export default function PanelDeploys({ variant = 'card' }: Props) {
           )}
         </div>
       )}
+
+      {/* ── Source address: the admin repoints the panel whenever it moves ── */}
+      {panel && (
+        <form onSubmit={saveRepo} className="mt-3 flex flex-wrap items-center gap-2">
+          <label htmlFor="panel-source-repo" className="text-xs text-slate-400 shrink-0">
+            مخزن منبع پنل
+          </label>
+          <input
+            id="panel-source-repo"
+            dir="ltr"
+            value={repoDraft}
+            onChange={(e) => setRepoDraft(e.target.value)}
+            placeholder="owner/name"
+            className="input-field font-mono text-xs flex-1 min-w-[16rem]"
+          />
+          <button type="submit" disabled={repoBusy} className="btn-ghost text-xs flex items-center gap-1.5">
+            {repoBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+            ذخیرهٔ آدرس
+          </button>
+          {panel.defaultRepo && panel.repo !== panel.defaultRepo && (
+            <button
+              type="button"
+              onClick={() => {
+                setRepoDraft(panel.defaultRepo)
+                void saveRepo(undefined, panel.defaultRepo)
+              }}
+              className="btn-ghost text-xs text-slate-400"
+            >
+              بازگشت به {panel.defaultRepo}
+            </button>
+          )}
+        </form>
+      )}
+      {repoMsg && <p className="mt-2 text-xs text-slate-400" dir="auto">{repoMsg}</p>}
 
       {error && (
         <div className="mt-4 flex items-start gap-2 text-xs text-error-300 px-3 py-2 rounded-lg bg-error-500/10 border border-error-500/30">

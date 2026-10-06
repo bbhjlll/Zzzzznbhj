@@ -253,6 +253,14 @@ const SCHEMA_STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS idx_sub_groups_user ON sub_groups(user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_worker_members_owner ON worker_members(owner_user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_worker_members_dep ON worker_members(deployment_id)`,
+  // Admin-editable configuration. `panel_repo` holds the panel's source
+  // repository (`owner/name`) when it has been repointed away from the catalog
+  // default, so the override survives isolate restarts and applies to every path.
+  `CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
 ]
 
 // Column additions for databases created before these fields existed.
