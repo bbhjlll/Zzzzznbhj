@@ -1,7 +1,7 @@
 # Local development config — identical to wrangler.toml plus the local D1
 # binding so `npm run dev:full` gets a simulated database via Miniflare.
 # CI/production uses wrangler.toml (D1 attached via dashboard bindings).
-name = "miliconfigpro-v1"
+name = "zzzzznbhj"
 main = "worker/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
